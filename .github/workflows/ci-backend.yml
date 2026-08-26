@@ -1,0 +1,91 @@
+name: Backend CI (Build & Verify)
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'smart-admin-api-java17-springboot3/**'
+      - 'smart-admin-api-java8-springboot2/**'
+      - '.github/workflows/ci-backend.yml'
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - 'smart-admin-api-java17-springboot3/**'
+      - 'smart-admin-api-java8-springboot2/**'
+      - '.github/workflows/ci-backend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-java17:
+    name: Build Backend (Java 17 + Spring Boot 3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: smart-admin-api-java17-springboot3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Maven Build (dev profile, skip tests)
+        run: |
+          mvn -B clean package \
+            -DskipTests \
+            --file pom.xml
+
+      - name: Verify artifact exists
+        run: |
+          JAR="sa-admin/target/sa-admin-dev-3.0.0.jar"
+          if [ ! -f "$JAR" ]; then
+            echo "❌ Expected JAR not found: $JAR"
+            ls -la sa-admin/target/ || true
+            exit 1
+          fi
+          echo "✅ JAR found: $JAR ($(du -h $JAR | cut -f1))"
+
+  build-java8:
+    name: Build Backend (Java 8 + Spring Boot 2)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: smart-admin-api-java8-springboot2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 8
+        uses: actions/setup-java@v4
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Maven Build (dev profile, skip tests)
+        run: |
+          mvn -B clean package \
+            -DskipTests \
+            --file pom.xml
+
+      - name: Verify artifact exists
+        run: |
+          JAR="sa-admin/target/sa-admin-dev-3.0.0.jar"
+          if [ ! -f "$JAR" ]; then
+            echo "❌ Expected JAR not found: $JAR"
+            ls -la sa-admin/target/ || true
+            exit 1
+          fi
+          echo "✅ JAR found: $JAR ($(du -h $JAR | cut -f1))"

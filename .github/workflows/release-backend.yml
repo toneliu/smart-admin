@@ -1,0 +1,191 @@
+name: Backend Release (Tag Build & Publish)
+
+on:
+  push:
+    tags:
+      - 'sa-v[0-9]+.[0-9]+.[0-9]+**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-backend:
+    name: Build Backend ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Java17+SpringBoot3
+            dir: smart-admin-api-java17-springboot3
+            jdk: '17'
+            output_name: smart-admin-backend-java17-springboot3.jar
+          - label: Java8+SpringBoot2
+            dir: smart-admin-api-java8-springboot2
+            jdk: '8'
+            output_name: smart-admin-backend-java8-springboot2.jar
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version info
+        id: info
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF_NAME}"
+          # tag 形如 sa-v1.0.0，提取语义版本号
+          SEM_VER="${TAG_NAME#sa-v}"
+          echo "tag=$TAG_NAME"
+          echo "semver=$SEM_VER"
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "semver=$SEM_VER" >> $GITHUB_OUTPUT
+
+      - name: Setup JDK ${{ matrix.jdk }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.jdk }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Maven Package (prod profile, skip tests)
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          mvn -B clean package \
+            -Pprod \
+            -DskipTests \
+            --file pom.xml
+
+      - name: Verify and rename artifact
+        id: artifact
+        run: |
+          set -euo pipefail
+          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.0.jar"
+          if [ ! -f "$SRC" ]; then
+            echo "❌ Build output not found: $SRC"
+            echo "--- Listing ${{ matrix.dir }}/sa-admin/target/ ---"
+            ls -la "${{ matrix.dir }}/sa-admin/target/" || true
+            exit 1
+          fi
+          # 用输出名 + 语义版本号重命名，便于辨识
+          DIR="release-artifacts"
+          mkdir -p "$DIR"
+          OUTPUT="${DIR}/${{ matrix.output_name }}"
+          # 不带版本号的通用名
+          cp "$SRC" "$OUTPUT"
+          # 带版本号的命名
+          VERSIONED="${DIR}/$(basename $OUTPUT .jar)-${{ steps.info.outputs.semver }}.jar"
+          cp "$SRC" "$VERSIONED"
+          echo "✅ Produced:"
+          ls -lah "$OUTPUT" "$VERSIONED"
+          SHA256=$(sha256sum "$OUTPUT" | awk '{print $1}')
+          echo "sha256=$SHA256"
+          echo "output=$OUTPUT" >> $GITHUB_OUTPUT
+          echo "versioned=$VERSIONED" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifacts (for release job aggregation)
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-build-${{ matrix.label }}
+          path: release-artifacts/*
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build-backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-staging
+          pattern: backend-build-*
+          merge-multiple: true
+
+      - name: Inspect release staging
+        run: |
+          echo "=== Release staging contents ==="
+          ls -lah release-staging/
+          echo ""
+          echo "=== SHA256 Checksums ==="
+          (cd release-staging && sha256sum *.jar) | tee release-staging/SHA256SUMS.txt
+
+      - name: Copy SQL scripts
+        run: |
+          set -euo pipefail
+          SQL_SRC="数据库SQL脚本"
+          if [ -d "$SQL_SRC" ]; then
+            SQL_ZIP="release-staging/smart-admin-sql-scripts.zip"
+            zip -r "$SQL_ZIP" "$SQL_SRC"
+            echo "✅ SQL scripts packaged: $SQL_ZIP"
+          else
+            echo "⚠️ SQL scripts directory not found, skipping."
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          cat > RELEASE_BODY.md << 'NOTES_EOF'
+          ## SmartAdmin 后端发布包
+          
+          本 Release 由 GitHub Actions 自动构建，包含两个后端版本的 Spring Boot 可执行 JAR（prod profile）。
+          
+          ### 产物清单
+          NOTES_EOF
+          
+          for jar in release-staging/*.jar; do
+            NAME=$(basename "$jar")
+            SIZE=$(du -h "$jar" | cut -f1)
+            SHA=$(sha256sum "$jar" | awk '{print $1}')
+            echo "- **$NAME** ($SIZE) — \`sha256:$SHA\`" >> RELEASE_BODY.md
+          done
+          
+          if [ -f release-staging/smart-admin-sql-scripts.zip ]; then
+            echo "" >> RELEASE_BODY.md
+            echo "### 数据库脚本" >> RELEASE_BODY.md
+            echo "- smart-admin-sql-scripts.zip：初始化 SQL 脚本（来源于仓库「数据库SQL脚本」目录）" >> RELEASE_BODY.md
+          fi
+          
+          cat >> RELEASE_BODY.md << 'NOTES_EOF'
+          
+          ### 启动方式
+          ```bash
+          # Java 17 + Spring Boot 3 版本（推荐新环境）
+          java -jar smart-admin-backend-java17-springboot3.jar \
+            --spring.profiles.active=prod \
+            --spring.datasource.druid.url=jdbc:mysql://localhost:3306/smart_admin?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai \
+            --spring.datasource.druid.username=root \
+            --spring.datasource.druid.password=your_password
+          
+          # Java 8 + Spring Boot 2 版本（兼容旧环境）
+          java -jar smart-admin-backend-java8-springboot2.jar \
+            --spring.profiles.active=prod
+          ```
+          
+          ### 使用的版本
+          - SmartAdmin 源码版本：pom.xml 中 3.0.0
+          - Java 17 版本：Spring Boot 3.5.4
+          - Java 8 版本：Spring Boot 2.7.18
+          NOTES_EOF
+          
+          cat RELEASE_BODY.md
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: SmartAdmin Backend ${{ github.ref_name }}
+          body_path: RELEASE_BODY.md
+          files: |
+            release-staging/*.jar
+            release-staging/*.zip
+            release-staging/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') }}
