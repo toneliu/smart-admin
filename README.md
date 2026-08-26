@@ -81,3 +81,281 @@
 - **【后端-多环境】：** maven多环境：开发、测试、预发布、生产 环境配置
 - **【后端-系统钩子】：** smart-reload，为系统预留钩子，动态加载，在不重启程序前提下执行一些代码
 - 以上只是沧海一粟，更多的细节等待你的发现！[去查看](https://smartadmin.vip)
+
+---
+
+## 🚀 Release 发布包运行指南（无需下载源码、无需 Maven）
+
+> 本指南面向「直接从 GitHub Release 下载 JAR 包，在本地/服务器运行后端」的场景。适合部署、测试人员以及不关心源码编译的开发者。
+
+### 📦 1. 发布包下载
+
+打开项目 Release 页面（形如 `https://github.com/toneliu/smart-admin/releases`），下载对应版本的 JAR：
+
+| 文件 | 适用环境 | JDK 要求 | Spring Boot | 说明 |
+|---|---|---|---|---|
+| `smart-admin-backend-java17-springboot3.jar` | **推荐新环境** | JDK 17+ | 3.5.x | MySQL 驱动 9.x、Sa-Token、MyBatis-Plus |
+| `smart-admin-backend-java8-springboot2.jar` | 兼容旧环境 | JDK 8+ | 2.7.x | MySQL 驱动 8.x、Spring 生态兼容 JDK 8 |
+
+同时下载 `smart-admin-sql-scripts.zip`（数据库初始化脚本）和 `SHA256SUMS.txt`（校验）。
+
+---
+
+### 📋 2. 运行前置条件
+
+| 组件 | 版本要求 | 说明 |
+|---|---|---|
+| **JDK** | Java 17+ 或 Java 8+ | 与下载的 JAR 对应；可用 `java -version` 验证 |
+| **MySQL** | 5.7+ / 8.0+ | 字符集 `utf8mb4`，数据库名建议 `smart_admin_v3` |
+| **Redis** | 5.0+ / 6.x / 7.x | Sa-Token 会话、系统缓存**强依赖 Redis**，必须启动 |
+| **磁盘权限** | — | 需有 `/home/logs/` 与 `/home/smart_admin_v3/upload/` 的写权限，或通过启动参数自定义目录 |
+| **端口** | 默认 `1024` | `server.port` 可通过参数覆盖，需确保不被占用 |
+
+---
+
+### 💾 3. 初始化数据库
+
+1. 解压 `smart-admin-sql-scripts.zip`，找到 `数据库SQL脚本/mysql/` 目录下的初始化 SQL 文件。
+2. 在 MySQL 中创建数据库并导入：
+
+```sql
+CREATE DATABASE smart_admin_v3 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+USE smart_admin_v3;
+SOURCE /path/to/数据库SQL脚本/mysql/xxx.sql;   -- 按脚本顺序依次导入（如有 README.md 请先阅读）
+```
+
+3. 默认数据库账户（prod profile 内置）：
+   - 用户名：`root`
+   - 密码：`SmartAdmin666`
+   - URL：`jdbc:mysql://127.0.0.1:3306/smart_admin_v3?...`
+   - ⚠️ **正式环境必须通过启动参数覆盖此密码**，见第 5 节。
+
+---
+
+### ⚡️ 4. 快速启动（最简命令）
+
+假设本地 MySQL（root/SmartAdmin666@127.0.0.1:3306/smart_admin_v3）和 Redis（127.0.0.1:6379，无密码）已就绪。
+
+```bash
+# === Java 17 版本（推荐）===
+java -jar smart-admin-backend-java17-springboot3.jar \
+  --spring.profiles.active=prod
+
+# === Java 8 版本（兼容旧环境）===
+java -jar smart-admin-backend-java8-springboot2.jar \
+  --spring.profiles.active=prod
+```
+
+> 无论 JAR 包用的是 prod profile 构建，都建议显式指定 `--spring.profiles.active=prod` 让运行时加载正确的环境配置分支。
+
+---
+
+### 🎛️ 5. 关键配置覆盖（不用重新打包，启动参数就能改）
+
+所有内置 `application.yaml` / `sa-base.yaml` 的配置，都可通过命令行 `--key=value` 覆盖（Spring Boot 松绑定规则）。下面是**部署时几乎必改**的常用参数清单：
+
+#### 5.1 数据源（MySQL）
+
+```bash
+--spring.datasource.druid.url="jdbc:mysql://10.0.0.10:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true"
+--spring.datasource.druid.username=app_sa
+--spring.datasource.druid.password=YourStr0ngPassw0rd!
+--spring.datasource.druid.driver-class-name=com.mysql.cj.jdbc.Driver
+# 如果通过数据库防火墙连接，可将驱动类换成 com.firewall.jdbc.FirewallDriver（需额外引入 firewall-jdbc 依赖）
+```
+
+#### 5.2 Redis（缓存 + Sa-Token 会话）
+
+```bash
+--spring.data.redis.host=10.0.0.11
+--spring.data.redis.port=6379
+--spring.data.redis.password=YourRedisPassword
+--spring.data.redis.database=1
+--spring.data.redis.timeout=10000ms
+```
+
+#### 5.3 端口与访问路径
+
+```bash
+--server.port=8080
+--server.servlet.context-path=/api    # 所有接口加 /api 前缀（可选）
+```
+
+#### 5.4 日志目录与文件上传（生产环境务必指定到可写目录）
+
+```bash
+--project.log-directory=/var/log/smart-admin/${spring.profiles.active}
+--file.storage.mode=local
+--file.storage.local.upload-path=/data/smart-admin/upload/
+--file.storage.local.url-prefix=https://your-domain.com/files/
+```
+
+#### 5.5 Sa-Token（会话安全）
+
+```bash
+--sa-token.timeout=86400                 # 24小时过期
+--sa-token.is-concurrent=false           # 同账号异地登录挤下线
+--sa-token.auto-renew=true
+```
+
+#### 5.6 Knife4j / Swagger（生产建议关闭）
+
+```bash
+--springdoc.swagger-ui.enabled=false
+--springdoc.api-docs.enabled=false
+--knife4j.enable=false
+```
+
+---
+
+### 🚚 6. 完整启动示例（生产环境单命令）
+
+**Java 17 版本：**
+
+```bash
+mkdir -p /var/log/smart-admin /data/smart-admin/upload
+
+nohup java \
+  -Xms1g -Xmx2g -XX:+UseG1GC \
+  -Duser.timezone=Asia/Shanghai \
+  -Dfile.encoding=UTF-8 \
+  -jar /opt/smart-admin/smart-admin-backend-java17-springboot3.jar \
+  --spring.profiles.active=prod \
+  --server.port=1024 \
+  --spring.datasource.druid.url="jdbc:mysql://10.0.0.10:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true" \
+  --spring.datasource.druid.username=app_sa \
+  --spring.datasource.druid.password='YourStr0ngPassw0rd!' \
+  --spring.data.redis.host=10.0.0.11 \
+  --spring.data.redis.password='RedisPass!' \
+  --project.log-directory=/var/log/smart-admin \
+  --file.storage.local.upload-path=/data/smart-admin/upload \
+  --springdoc.swagger-ui.enabled=false \
+  --knife4j.enable=false \
+  > /var/log/smart-admin/startup.log 2>&1 &
+
+echo $! > /var/run/smart-admin.pid
+```
+
+**Java 8 版本**：JVM 参数把 `-XX:+UseG1GC` 可选替换为 CMS 或默认，其余保持一致即可。
+
+---
+
+### ✅ 7. 验证启动成功
+
+```bash
+# 方式 1：看健康检查接口（management.endpoints.web.exposure.include 默认包含 health,info）
+curl http://127.0.0.1:1024/actuator/health
+# 期望返回 {"status":"UP"}
+
+# 方式 2：看 Knife4j/Swagger 文档（生产若没关闭）
+# 浏览器访问 http://<服务器IP>:1024/doc.html
+
+# 方式 3：看启动日志末尾
+tail -n 50 /var/log/smart-admin/startup.log
+# 期望看到 "Started AdminApplication in x.xxx seconds"
+```
+
+默认超级管理员账号（SQL 脚本初始化后）：查阅官方文档或在线预览 [https://preview.smartadmin.vip](https://preview.smartadmin.vip)。
+
+---
+
+### 🔧 8. 生产部署建议
+
+| 项目 | 建议 |
+|---|---|
+| **进程守护** | 使用 `systemd` 管理（服务文件示例见下方 8.1），禁止裸 `nohup` 丢后台 |
+| **参数来源** | 机密（DB / Redis 密码）使用环境变量 `${DB_PASSWORD}` 或外部配置中心，不要写死在启动脚本 |
+| **反向代理** | 前置 Nginx，启用 HTTPS / gzip / 静态缓存；后端只监听 127.0.0.1 或内网 IP |
+| **日志归档** | 日志目录 `/var/log/smart-admin/` 用 `logrotate` 每天切割，保留 30 天 |
+| **JVM 参数** | 容器化部署按 `cgroup` 限制设置 `-XX:MaxRAMPercentage=75.0` 替代固定 `-Xmx` |
+| **数据库连接池** | 根据实际并发调 `--spring.datasource.druid.max-active`（默认 200），避免超过数据库 `max_connections` |
+| **定时任务** | SmartJob 已内置开启，数据库 `t_smart_job` 表中维护任务配置，可通过后台「系统管理 → 定时任务」可视化维护 |
+
+#### 8.1 systemd 服务文件示例
+
+`/etc/systemd/system/smart-admin.service`：
+
+```ini
+[Unit]
+Description=SmartAdmin Backend Service
+After=network.target mysql.service redis.service
+
+[Service]
+Type=simple
+User=sa
+Group=sa
+WorkingDirectory=/opt/smart-admin
+Environment="JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
+Environment="DB_PASSWORD=YourStr0ngPassw0rd!"
+Environment="REDIS_PASSWORD=RedisPass!"
+
+ExecStart=/bin/sh -c 'exec ${JAVA_HOME}/bin/java \
+  -Xms1g -Xmx2g -XX:+UseG1GC \
+  -Duser.timezone=Asia/Shanghai -Dfile.encoding=UTF-8 \
+  -jar smart-admin-backend-java17-springboot3.jar \
+  --spring.profiles.active=prod \
+  --server.port=1024 \
+  --spring.datasource.druid.url="jdbc:mysql://10.0.0.10:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true" \
+  --spring.datasource.druid.username=app_sa \
+  --spring.datasource.druid.password="${DB_PASSWORD}" \
+  --spring.data.redis.host=10.0.0.11 \
+  --spring.data.redis.password="${REDIS_PASSWORD}" \
+  --project.log-directory=/var/log/smart-admin \
+  --file.storage.local.upload-path=/data/smart-admin/upload \
+  --springdoc.swagger-ui.enabled=false \
+  --knife4j.enable=false'
+
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:/var/log/smart-admin/stdout.log
+StandardError=append:/var/log/smart-admin/stderr.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启动与自启：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now smart-admin
+sudo systemctl status smart-admin    # 查看状态
+sudo journalctl -u smart-admin -f   # 实时查看日志
+```
+
+---
+
+### 🛟 9. 常见问题排查（FAQ）
+
+| 现象 | 可能原因 | 解决方法 |
+|---|---|---|
+| 启动即退出，日志报 `Communications link failure` / `Unable to create initial connections of pool` | MySQL 不通 / 账号密码错 / 数据库未创建 | `telnet <mysql-host> 3306` 检查网络；用 MySQL 客户端验证账号能否登录；确认库名存在且字符集 utf8mb4 |
+| 启动报 `Unable to connect to Redis` / `RedisConnectionFailureException` | Redis 不通 / 未启动 / 密码错 / 库号不存在 | `redis-cli -h <host> -p 6379 -a <pwd>` 手动验证；检查 `--spring.data.redis.database` 是否 0~15 范围 |
+| 启动卡在 `Started AdminApplication in xxx seconds` 之前，`Druid` 连接池迟迟不返回 | MySQL 连接池拿不到连接，防火墙或 DB `max_connections` 已耗尽 | 减小 `--spring.datasource.druid.initial-size/min-idle/max-active`；DBA 侧检查 `show processlist` |
+| 访问 `http://host:1024/` 报 404 | 接口前缀被覆盖，或前端未部署 | 健康检查 `curl http://host:1024/actuator/health`；前端需单独部署 smart-admin-web-* |
+| 文件上传报错（Permission denied） | `--file.storage.local.upload-path` 目录无写权限 | `mkdir -p` 该目录并 `chown` 为运行用户 |
+| Knife4j 打开空白 / 404 | 生产环境关闭了 swagger | 需要时把 `--springdoc.swagger-ui.enabled=true --knife4j.enable=true` |
+| 验证码不显示 / 登录时 Sa-Token 报错 | Redis 连接失败导致缓存写入报错 | 检查 Redis 参数；`--spring.cache.type=redis` 不要改成 simple |
+| JDK 版本不对报 `UnsupportedClassVersionError` | JAR 与 JDK 版本不匹配 | Java17 版 JAR 需要 `java -version` ≥ 17；Java8 版 JAR 对应 JDK ≥ 1.8 |
+
+---
+
+### 🧱 架构调用链回顾
+
+```
+浏览器/前端 → Nginx → server.port(1024)
+                   ↓
+         Spring Boot / Tomcat（内嵌）
+                   ↓
+         DispatcherServlet → Controller → Service → Manager
+                                                    ↓
+                              MyBatis-Plus Mapper (@Mapper, 42 个)
+                                                    ↓
+                              Druid DataSource (连接池)
+                                                    ↓
+                              MySQL JDBC Driver (com.mysql.cj.jdbc.Driver)
+                                                    ↓
+                              MySQL 5.7+ / 8.0+ (库: smart_admin_v3)
+```
+
+如还有疑问，参考官方文档：[https://smartadmin.vip](https://smartadmin.vip)。
