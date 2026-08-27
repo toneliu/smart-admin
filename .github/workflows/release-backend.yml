@@ -224,12 +224,16 @@ jobs:
           # Java 17 + Spring Boot 3 版本（推荐新环境）
           java -jar smart-admin-backend-java17-springboot3.jar \
             --spring.profiles.active=prod \
-            --spring.datasource.druid.url=jdbc:mysql://localhost:3306/smart_admin_v3?autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai \
-            --spring.datasource.druid.username=root \
-            --spring.datasource.druid.password=your_password \
+            --project.log-directory=/home/youruser/logs/smart_admin \
+            --spring.datasource.url='jdbc:mysql://localhost:3306/smart_admin_v3?autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai' \
+            --spring.datasource.username=root \
+            --spring.datasource.password=your_password \
             --server.port=1024
           # 启动后浏览器直接打开: http://服务器IP:1024/   （就是前端页面！）
           # 后端 API 同端口同域名自动服务，不需要额外代理
+          # 注意：JDBC URL 必须用单引号包裹，否则 bash 会把 & 当后台任务分隔符
+          # 注意：属性名是 spring.datasource.url，不是 spring.datasource.druid.url
+          # 前提：本地需有 MySQL 和 Redis 可连接
           
           # Java 8 + Spring Boot 2 版本（兼容旧环境）
           java -jar smart-admin-backend-java8-springboot2.jar \

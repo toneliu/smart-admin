@@ -222,9 +222,9 @@ nohup java \
   -jar /opt/smart-admin/smart-admin-backend-java17-springboot3.jar \
   --spring.profiles.active=prod \
   --server.port=1024 \
-  --spring.datasource.druid.url="jdbc:mysql://10.0.0.10:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true" \
-  --spring.datasource.druid.username=app_sa \
-  --spring.datasource.druid.password='YourStr0ngPassw0rd!' \
+  --spring.datasource.url='jdbc:mysql://10.0.0.10:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true' \
+  --spring.datasource.username=app_sa \
+  --spring.datasource.password='YourStr0ngPassw0rd!' \
   --spring.data.redis.host=10.0.0.11 \
   --spring.data.redis.password='RedisPass!' \
   --project.log-directory=/var/log/smart-admin \
