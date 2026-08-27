@@ -35,7 +35,6 @@ jobs:
         run: |
           set -euo pipefail
           TAG_NAME="${GITHUB_REF_NAME}"
-          # tag 形如 sa-v1.0.0，提取语义版本号
           SEM_VER="${TAG_NAME#sa-v}"
           echo "tag=$TAG_NAME"
           echo "semver=$SEM_VER"
@@ -48,15 +47,24 @@ jobs:
           java-version: ${{ matrix.jdk }}
           distribution: 'temurin'
           cache: 'maven'
-          server-id: github
-          server-username: MAVEN_SERVER_USERNAME
-          server-password: MAVEN_SERVER_PASSWORD
+
+      - name: Install firewall-jdbc JAR from GitHub Release (com.firewall:firewall-jdbc:1.0.2)
+        run: |
+          set -euo pipefail
+          JAR_URL="https://github.com/toneliu/firewall-jdbc/releases/download/v1.0.2/firewall-jdbc-1.0.2.jar"
+          TMP="/tmp/firewall-jdbc-1.0.2.jar"
+          echo "下载 firewall-jdbc 1.0.2 Release JAR: $JAR_URL"
+          curl -sSL --fail-with-body -o "$TMP" "$JAR_URL"
+          ls -lh "$TMP"
+          mvn -B install:install-file \
+            -Dfile="$TMP" \
+            -DgroupId=com.firewall \
+            -DartifactId=firewall-jdbc \
+            -Dversion=1.0.2 \
+            -Dpackaging=jar
 
       - name: Maven Package (prod profile, skip tests)
         working-directory: ${{ matrix.dir }}
-        env:
-          MAVEN_SERVER_USERNAME: toneliu
-          MAVEN_SERVER_PASSWORD: ${{ secrets.FIREWALL_JDBC_PAT }}
         run: |
           set -euo pipefail
           mvn -B clean package \
@@ -68,20 +76,17 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.2.jar"
+          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.3.jar"
           if [ ! -f "$SRC" ]; then
             echo "❌ Build output not found: $SRC"
             echo "--- Listing ${{ matrix.dir }}/sa-admin/target/ ---"
             ls -la "${{ matrix.dir }}/sa-admin/target/" || true
             exit 1
           fi
-          # 用输出名 + 语义版本号重命名，便于辨识
           DIR="release-artifacts"
           mkdir -p "$DIR"
           OUTPUT="${DIR}/${{ matrix.output_name }}"
-          # 不带版本号的通用名
           cp "$SRC" "$OUTPUT"
-          # 带版本号的命名
           VERSIONED="${DIR}/$(basename $OUTPUT .jar)-${{ steps.info.outputs.semver }}.jar"
           cp "$SRC" "$VERSIONED"
           echo "✅ Produced:"
@@ -144,8 +149,12 @@ jobs:
           
           本 Release 由 GitHub Actions 自动构建，包含两个后端版本的 Spring Boot 可执行 JAR（prod profile）。
           
-          firewall-jdbc 驱动通过 **Maven 依赖** 从 GitHub Packages (`com.firewall:firewall-jdbc:1.0.2`) 引入，
-          不再内联源码到 sa-base；同时保留 FirewallIdentityFilter 从 Sa-Token 注入用户身份。
+          **firewall-jdbc 引入方式（v1.0.3 新方案）**：
+          直接从 firewall-jdbc 项目的 GitHub Release 下载官方 JAR（v1.0.2），
+          通过 `mvn install:install-file` 安装到本地 Maven 仓库，再按标准 Maven 坐标 `com.firewall:firewall-jdbc:1.0.2` 引用。
+          ❌ 不使用 GitHub Packages（免 PAT、免认证）
+          ❌ 不内联 firewall-jdbc 源码（保持独立 jar）
+          ✅ FirewallIdentityFilter 保留：从 Sa-Token 会话取用户 ID → FirewallContextHolder ThreadLocal → FirewallDriver.connect() 注入
           
           ### 产物清单
           NOTES_EOF
@@ -179,11 +188,12 @@ jobs:
             --spring.profiles.active=prod
           ```
           
-          ### 使用的版本
-          - SmartAdmin 源码版本：pom.xml 中 3.0.2
-          - firewall-jdbc 驱动版本：com.firewall:firewall-jdbc:1.0.2（从 GitHub Packages 拉取，跨仓库引用）
-          - Java 17 版本：Spring Boot 3.5.4
-          - Java 8 版本：Spring Boot 2.7.18
+          ### 本次修复（sa-v1.0.3 对比 sa-v1.0.2）
+          - **修复 Java 17+SB3 编译失败**：FirewallIdentityFilter 的 Servlet 包名从 `javax.servlet.*` 改为 `jakarta.servlet.*`（Spring Boot 3 基于 Jakarta EE 9+，命名空间变更）。Java 8+SB2 版本仍保持 `javax.servlet.*` 不变。
+          - **firewall-jdbc 引入改为直接引用 Release JAR**（如上述说明）：不需要 GitHub Packages Token，不需要 CI 配置任何 Secrets，公开 URL 即可拉取。
+          - SmartAdmin 源码版本统一：3.0.3
+          - firewall-jdbc 驱动版本：com.firewall:firewall-jdbc:1.0.2（由 toneliu/firewall-jdbc Release 提供）
+          - 旧版 Release：sa-v1.0.0 / sa-v1.0.1 / sa-v1.0.2 全部完整保留，不做删除
           NOTES_EOF
           
           cat RELEASE_BODY.md

@@ -4,7 +4,7 @@
 
     <groupId>net.lab1024</groupId>
     <artifactId>sa-parent</artifactId>
-    <version>3.0.2</version>
+    <version>3.0.3</version>
     <packaging>pom</packaging>
 
     <name>sa-parent</name>
@@ -55,15 +55,6 @@
         <tika.version>2.9.4</tika.version>
     </properties>
 
-    <repositories>
-        <repository>
-            <id>github</id>
-            <name>GitHub Packages toneliu/firewall-jdbc</name>
-            <url>https://maven.pkg.github.com/toneliu/firewall-jdbc</url>
-            <releases><enabled>true</enabled></releases>
-            <snapshots><enabled>false</enabled></snapshots>
-        </repository>
-    </repositories>
 
     <dependencyManagement>
         <dependencies>

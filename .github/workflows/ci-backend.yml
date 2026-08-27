@@ -40,14 +40,23 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: 'maven'
-          server-id: github
-          server-username: MAVEN_SERVER_USERNAME
-          server-password: MAVEN_SERVER_PASSWORD
+
+      - name: Install firewall-jdbc JAR from GitHub Release (com.firewall:firewall-jdbc:1.0.2)
+        run: |
+          set -euo pipefail
+          JAR_URL="https://github.com/toneliu/firewall-jdbc/releases/download/v1.0.2/firewall-jdbc-1.0.2.jar"
+          TMP="/tmp/firewall-jdbc-1.0.2.jar"
+          echo "下载 $JAR_URL ..."
+          curl -sSL --fail-with-body -o "$TMP" "$JAR_URL"
+          ls -lh "$TMP"
+          mvn -B install:install-file \
+            -Dfile="$TMP" \
+            -DgroupId=com.firewall \
+            -DartifactId=firewall-jdbc \
+            -Dversion=1.0.2 \
+            -Dpackaging=jar
 
       - name: Maven Build (dev profile, skip tests)
-        env:
-          MAVEN_SERVER_USERNAME: toneliu
-          MAVEN_SERVER_PASSWORD: ${{ secrets.FIREWALL_JDBC_PAT }}
         run: |
           mvn -B clean package \
             -DskipTests \
@@ -55,7 +64,7 @@ jobs:
 
       - name: Verify artifact exists
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.2.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.3.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
@@ -79,14 +88,22 @@ jobs:
           java-version: '8'
           distribution: 'temurin'
           cache: 'maven'
-          server-id: github
-          server-username: MAVEN_SERVER_USERNAME
-          server-password: MAVEN_SERVER_PASSWORD
+
+      - name: Install firewall-jdbc JAR from GitHub Release (com.firewall:firewall-jdbc:1.0.2)
+        run: |
+          set -euo pipefail
+          JAR_URL="https://github.com/toneliu/firewall-jdbc/releases/download/v1.0.2/firewall-jdbc-1.0.2.jar"
+          TMP="/tmp/firewall-jdbc-1.0.2.jar"
+          curl -sSL --fail-with-body -o "$TMP" "$JAR_URL"
+          ls -lh "$TMP"
+          mvn -B install:install-file \
+            -Dfile="$TMP" \
+            -DgroupId=com.firewall \
+            -DartifactId=firewall-jdbc \
+            -Dversion=1.0.2 \
+            -Dpackaging=jar
 
       - name: Maven Build (dev profile, skip tests)
-        env:
-          MAVEN_SERVER_USERNAME: toneliu
-          MAVEN_SERVER_PASSWORD: ${{ secrets.FIREWALL_JDBC_PAT }}
         run: |
           mvn -B clean package \
             -DskipTests \
@@ -94,7 +111,7 @@ jobs:
 
       - name: Verify artifact exists
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.2.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.3.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
