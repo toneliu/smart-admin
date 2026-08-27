@@ -116,7 +116,7 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.5.jar"
+          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.7.jar"
           if [ ! -f "$SRC" ]; then
             echo "❌ Build output not found: $SRC"
             echo "--- Listing ${{ matrix.dir }}/sa-admin/target/ ---"
@@ -257,16 +257,16 @@ jobs:
           fi
           
           cat >> RELEASE_BODY.md << 'NOTES_EOF'
-          
-          ### sa-v1.0.6 变更摘要（对比 sa-v1.0.5）
-          - 🐛 **修复运行报错「环境变量为空：project.log-directory」**：Java 17+SpringBoot3 / Java 8+SpringBoot2 两个 `sa-admin/pom.xml` 声明了自定义的 `<resources>` 块，**完全覆盖了父 pom 的 profile 资源过滤逻辑**（父 pom 会排除 `dev/test/pre/prod/` 子目录，并只把当前 profile 的 `application.yaml`/`log4j2-spring.xml` 铺平复制到 classpath 根）。结果 `prod/application.yaml` 被留在 `prod/` 子目录里，Spring Boot 无法从 classpath 根加载，启动即抛 `Ip2RegionListener -> ExceptionInInitializerError: 环境变量为空：project.log-directory`。修复方式：删除两个 sa-admin/pom.xml 的 `<resources>` 覆盖，完全继承父 pom。
-          - 🐛 **修复 CI verify 步骤 SIGPIPE + pipefail 假阳性**：原验证脚本管道命令 `unzip -p | head -3 | grep -q` 和 `unzip -l | grep -q` 在 GitHub Actions bash 默认 `-eo pipefail` 下，当 `head`/`grep` 提前关闭管道时，`unzip` 收到 SIGPIPE (exit 141)，pipefail 使整个管道退出码非 0，导致 if 误判失败 exit 1，即便 Maven BUILD SUCCESS。改成「unzip -l 先落盘临时文件 → grep 在文件上判定」彻底消除。
+
+          ### sa-v1.0.7 变更摘要（对比 sa-v1.0.6）
+          - 🔐 **修复连接池场景下用户身份无法透传问题**：Druid 连接池在启动时预建连接（`initial-size=10`），此时无 HTTP 请求 → `FirewallContextHolder` 为空 → `FirewallDriver.connect()` 不注入 `firewall_user`。后续用户登录的请求复用池中连接，`connect()` 不再被调用，导致身份始终缺失。新增 `ConnectionIdentityDataSource` 包装类，在每次 `getConnection()` 时自动执行 `SET @firewall_user = '当前用户ID'`，将身份注入到 MySQL session 变量，数据库防火墙可通过该变量识别当前操作者。
+          - 🐛 **修复运行报错「环境变量为空：project.log-directory」**（继承 sa-v1.0.6 修复）
+          - 🐛 **修复 CI verify 步骤 SIGPIPE + pipefail 假阳性**（继承 sa-v1.0.6 修复）
           - 🎉 **前后端一体化打包**（继承 sa-v1.0.4 特性）：前端 TypeScript 版（Vue 3 + Vite + Ant Design Vue 4）编译后嵌入 Spring Boot fat JAR 的 `BOOT-INF/classes/static/`，启动后 `http://host:1024/` 直接访问
           - 🔌 **API 同源**（继承 sa-v1.0.4 特性）：`.env.production` 将 `VITE_APP_API_URL` 改为空字符串，前端 axios 请求走相对路径，与后端共享同端口+域名，**零跨域零配置**
-          - 🔐 **防火墙身份透传保持不变**：FirewallDriver + FirewallIdentityFilter 仍按 Sa-Token 登录态 → FirewallContextHolder ThreadLocal → JDBC FirewallIdentityComment 注入路径
           - 📦 **依赖**：firewall-jdbc 仍按 `com.firewall:firewall-jdbc:1.0.2` 从 GitHub Release JAR 下载 → `mvn install:install-file` 引入
-          - 📌 SmartAdmin 源码版本统一：3.0.5
-          - ✅ 旧 Release：sa-v1.0.0 ~ sa-v1.0.5 全部完整保留，不删除
+          - 📌 SmartAdmin 源码版本统一：3.0.7
+          - ✅ 旧 Release：sa-v1.0.0 ~ sa-v1.0.6 全部完整保留，不删除
           NOTES_EOF
           
           cat RELEASE_BODY.md

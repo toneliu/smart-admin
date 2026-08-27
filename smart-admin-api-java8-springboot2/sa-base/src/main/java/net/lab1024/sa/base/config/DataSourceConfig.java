@@ -128,7 +128,9 @@ public class DataSourceConfig {
             log.error("初始化数据源出错", e);
         }
 
-        return druidDataSource;
+        // 用身份注入包装类包裹 DruidDataSource
+        // 每次 getConnection 时自动 SET @firewall_user = 当前用户
+        return new ConnectionIdentityDataSource(druidDataSource);
     }
 
     @Bean
