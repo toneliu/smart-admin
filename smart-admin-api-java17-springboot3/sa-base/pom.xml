@@ -4,12 +4,12 @@
     <parent>
         <groupId>net.lab1024</groupId>
         <artifactId>sa-parent</artifactId>
-        <version>3.0.0</version>
+        <version>3.0.2</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>sa-base</artifactId>
-    <version>3.0.0</version>
+    <version>3.0.2</version>
 
     <name>sa-base</name>
     <description>sa-base project</description>
@@ -84,6 +84,12 @@
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.firewall</groupId>
+            <artifactId>firewall-jdbc</artifactId>
+            <version>1.0.2</version>
         </dependency>
 
         <dependency>
