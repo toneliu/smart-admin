@@ -1,6 +1,8 @@
 package net.lab1024.sa.base.config;
 
 import com.firewall.jdbc.FirewallContextHolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 
 import javax.sql.DataSource;
@@ -18,6 +20,8 @@ import java.sql.Statement;
  * 数据库防火墙可通过该变量识别当前操作者。
  */
 public class ConnectionIdentityDataSource extends DelegatingDataSource {
+
+    private static final Logger log = LoggerFactory.getLogger(ConnectionIdentityDataSource.class);
 
     public ConnectionIdentityDataSource(DataSource delegate) {
         super(delegate);
@@ -42,6 +46,7 @@ public class ConnectionIdentityDataSource extends DelegatingDataSource {
      */
     private void injectFirewallUser(Connection conn) throws SQLException {
         String user = FirewallContextHolder.getCurrentUser();
+        log.info("ConnectionIdentityDataSource.getConnection: ThreadLocal user={}", user);
         if (user != null && !user.trim().isEmpty()) {
             // 过滤非法字符，防止 SQL 注入
             String safeUser = user.trim().replaceAll("[^a-zA-Z0-9_\\-]", "");

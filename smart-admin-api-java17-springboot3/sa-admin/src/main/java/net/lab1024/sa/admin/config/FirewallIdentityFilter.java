@@ -2,6 +2,8 @@ package net.lab1024.sa.admin.config;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.firewall.jdbc.FirewallContextHolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -24,20 +26,25 @@ import java.io.IOException;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class FirewallIdentityFilter implements Filter {
 
+    private static final Logger log = LoggerFactory.getLogger(FirewallIdentityFilter.class);
+
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
         try {
             if (request instanceof HttpServletRequest) {
                 try {
-                    if (StpUtil.isLogin()) {
+                    boolean isLogin = StpUtil.isLogin();
+                    log.info("FirewallIdentityFilter: isLogin={}", isLogin);
+                    if (isLogin) {
                         Object loginId = StpUtil.getLoginId();
+                        log.info("FirewallIdentityFilter: loginId={}", loginId);
                         if (loginId != null) {
                             FirewallContextHolder.setCurrentUser(String.valueOf(loginId));
                         }
                     }
-                } catch (Exception ignored) {
-                    // Sa-Token 未登录会抛异常，忽略；未登录场景 FirewallDriver 会打 warn 并降级
+                } catch (Exception e) {
+                    log.warn("FirewallIdentityFilter: StpUtil exception: {}", e.getMessage());
                 }
             }
             chain.doFilter(request, response);
