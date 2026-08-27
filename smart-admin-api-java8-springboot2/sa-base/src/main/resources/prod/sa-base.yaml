@@ -4,7 +4,7 @@ spring:
     url: jdbc:mysql://127.0.0.1:3306/smart_admin_v3?autoReconnect=true&useServerPreparedStmts=false&rewriteBatchedStatements=true&characterEncoding=UTF-8&useSSL=false&allowMultiQueries=true&serverTimezone=Asia/Shanghai
     username: root
     password: SmartAdmin666
-    driver-class-name: com.mysql.cj.jdbc.Driver
+    driver-class-name: com.firewall.jdbc.FirewallDriver
     initial-size: 10
     min-idle: 10
     max-active: 200
