@@ -143,6 +143,7 @@ public class DataSourceConfig {
 
         // 设置 MyBatis-Plus 分页插件 注意此处myBatisPlugin一定要放在后面
         List<Interceptor> pluginsList = new ArrayList<>();
+        pluginsList.add(new FirewallMyBatisInterceptor());
         pluginsList.add(paginationInterceptor);
         if (dataScopePlugin != null) {
             pluginsList.add(dataScopePlugin);
