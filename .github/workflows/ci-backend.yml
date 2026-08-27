@@ -40,8 +40,14 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: 'maven'
+          server-id: github
+          server-username: MAVEN_SERVER_USERNAME
+          server-password: MAVEN_SERVER_PASSWORD
 
       - name: Maven Build (dev profile, skip tests)
+        env:
+          MAVEN_SERVER_USERNAME: toneliu
+          MAVEN_SERVER_PASSWORD: ${{ secrets.FIREWALL_JDBC_PAT }}
         run: |
           mvn -B clean package \
             -DskipTests \
@@ -49,7 +55,7 @@ jobs:
 
       - name: Verify artifact exists
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.0.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.2.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
@@ -73,8 +79,14 @@ jobs:
           java-version: '8'
           distribution: 'temurin'
           cache: 'maven'
+          server-id: github
+          server-username: MAVEN_SERVER_USERNAME
+          server-password: MAVEN_SERVER_PASSWORD
 
       - name: Maven Build (dev profile, skip tests)
+        env:
+          MAVEN_SERVER_USERNAME: toneliu
+          MAVEN_SERVER_PASSWORD: ${{ secrets.FIREWALL_JDBC_PAT }}
         run: |
           mvn -B clean package \
             -DskipTests \
@@ -82,7 +94,7 @@ jobs:
 
       - name: Verify artifact exists
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.0.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.2.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
