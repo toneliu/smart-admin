@@ -26,8 +26,13 @@ public class FirewallIdentityInterceptor implements HandlerInterceptor {
             if (StpUtil.isLogin()) {
                 Object loginId = StpUtil.getLoginId();
                 if (loginId != null) {
-                    FirewallContextHolder.setCurrentUser(String.valueOf(loginId));
-                    log.info("FirewallIdentityInterceptor: user={} set to ThreadLocal", loginId);
+                    // Sa-Token 多账号体系返回 "userType:userId"（如 "1:1"），只取 userId 部分
+                    String idStr = String.valueOf(loginId);
+                    if (idStr.contains(":")) {
+                        idStr = idStr.substring(idStr.lastIndexOf(":") + 1);
+                    }
+                    FirewallContextHolder.setCurrentUser(idStr);
+                    log.info("FirewallIdentityInterceptor: user={} set to ThreadLocal", idStr);
                 }
             }
         } catch (Exception e) {
