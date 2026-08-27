@@ -441,8 +441,11 @@ Nginx → server.port(1024)  Spring Boot / Tomcat
 # 1. 安装 Python 依赖
 pip3 install sqlparse pymysql
 
-# 2. 在真实 MySQL 上执行 ACL 建表脚本（含示例策略）
+# 2. 在真实 MySQL 上执行防火墙策略表脚本
+#    - acl_schema.sql:        t_firewall_acl 表级 ACL（必装）
+#    - clearance_schema.sql:  t_data_asset + t_user_clearance 密级表（推荐，配套密级校验）
 mysql -h127.0.0.1 -P3308 -uroot -p smart_admin_v3 < firewall/acl_schema.sql
+mysql -h127.0.0.1 -P3308 -uroot -p smart_admin_v3 < firewall/clearance_schema.sql
 
 # 3. 修改防火墙脚本顶部的 ACL_DB_CONFIG 指向你的真实 MySQL
 #    编辑 firewall/mysql_firewall.py 中的 ACL_DB_CONFIG 字典
@@ -590,6 +593,74 @@ pkill -SIGUSR1 -f mysql_firewall.py
 - `META`：`SHOW / EXPLAIN / DESC / DESCRIBE / USE / BEGIN / COMMIT / ROLLBACK / START / SAVEPOINT`
 - `OTHER`：无法识别首关键字的 SQL（如 PRAGMA、HINT 等）
 - 解析不出表名的 SQL：按 `ALLOW_ON_PARSE_FAIL` 全局开关决策（默认放行，监控模式）
+
+#### 6.5 数据密级校验（L2.5）
+
+ACL 通过后，防火墙会再做一道**数据密级校验**，确保用户的密级 ≥ SQL 涉及表的最高密级。策略存储在 `t_data_asset`（表密级）和 `t_user_clearance`（用户密级）两张表中。
+
+**密级体系**：
+
+| Level | 含义 | 示例表 |
+|---|---|---|
+| L1 | 公开 | `t_role`、`t_menu`、`t_file` |
+| L2 | 内部 | `t_order`、`t_department` |
+| L3 | 机密 | `t_employee`、`t_employee_dept` |
+| L4 | 绝密 | `t_firewall_acl`、`t_data_asset`、`t_user_clearance` |
+
+**校验规则**：`user.clearance_level >= max(table.sensitivity_level)`，不满足则拦截。
+
+**示例策略**（[firewall/clearance_schema.sql](firewall/clearance_schema.sql) 已包含 INSERT）：
+
+| user_id | clearance | 说明 |
+|---|---|---|
+| `1` | 4 | admin 绝密级，可访问所有表 |
+| `2` | 3 | hr 机密级，可看员工不可看审计表 |
+| `3` | 2 | 普通员工内部级，可看订单不可看员工 |
+| `*` | 1 | 默认公开级，仅可看 L1 表 |
+
+**决策顺序**（一条 SQL 在防火墙内的两道关）：
+
+```
+SQL ─→ ① ACL 决策（user × table × op 三维矩阵）
+        │ 通过
+        ▼
+      ② 密级校验（user_clearance >= max(table_level)）
+        │ 通过          │ 不通过
+        ▼              ▼
+      转发到 MySQL   Error 1142 拦截
+```
+
+**拦截效果示例**：
+
+| 用户 | clearance | SQL | 表密级 | 结果 |
+|---|---|---|---|---|
+| 3 (员工) | 2 | `SELECT * FROM t_employee` | 3 | ❌ 拒绝（2 < 3） |
+| 3 (员工) | 2 | `SELECT * FROM t_order` | 2 | ✅ 通过（2 >= 2） |
+| 2 (hr) | 3 | `SELECT * FROM t_firewall_acl` | 4 | ❌ 拒绝（3 < 4） |
+| 1 (admin) | 4 | `DROP TABLE t_employee` | 3 | ✅ 通过（4 >= 3，且 ACL 已通过） |
+| 9 (未配置) | 1（默认 `*`） | `SELECT * FROM t_role` | 1 | ✅ 通过（1 >= 1） |
+
+**回退策略**（容错）：
+
+- 用户未在 `t_user_clearance` 表中且无 `*` 通配符 → 默认 clearance = 1（公开级）
+- 表未在 `t_data_asset` 表中标记 → 视为 L1（公开），避免业务表全被拦
+- `t_data_asset` / `t_user_clearance` 表查询失败 → 防火墙以警告日志跳过密级校验，仅做 ACL（降级运行，不阻断业务）
+
+**部署**（在执行 [firewall/acl_schema.sql](firewall/acl_schema.sql) 之后）：
+
+```bash
+mysql -h127.0.0.1 -P3308 -uroot -p smart_admin_v3 < firewall/clearance_schema.sql
+# 重启防火墙，或热加载
+pkill -SIGUSR1 -f mysql_firewall.py
+```
+
+热加载成功后日志会输出：
+
+```
+[xx:xx:xx] 策略已加载：ACL 5 条 / 资产密级 11 条 / 用户密级 4 条
+[xx:xx:xx]          资产 | {'t_role': 1, 't_menu': 1, 't_order': 2, ...}
+[xx:xx:xx]          用户 | {'1': 4, '2': 3, '3': 2, '*': 1}
+```
 
 #### 7. 故障排查
 

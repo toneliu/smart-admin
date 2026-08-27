@@ -23,3 +23,10 @@ target/
 **/node_modules
 **/.vscode
 
+### python (firewall) ###
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+

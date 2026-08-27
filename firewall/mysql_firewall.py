@@ -80,30 +80,57 @@ logger = logging.getLogger('Firewall')
 # 表名/用户都支持 '*' 通配符
 _ACL_CACHE: dict = {}
 
+# 数据资产密级缓存：{ table_name(小写) -> sensitivity_level (1~4) }
+_DATA_ASSET_CACHE: dict = {}
+
+# 用户密级缓存：{ user_id -> clearance_level (1~4) }
+_USER_CLEARANCE_CACHE: dict = {}
+
 # 标记是否正在加载，防止并发触发
 _LOADING_FLAG = False
 
 
 def load_acl_from_db() -> bool:
     """
-    从 t_firewall_acl 表加载策略到内存
+    从 t_firewall_acl / t_data_asset / t_user_clearance 表加载策略到内存
     返回是否加载成功
     """
-    global _ACL_CACHE
+    global _ACL_CACHE, _DATA_ASSET_CACHE, _USER_CLEARANCE_CACHE
     try:
         conn = pymysql.connect(**ACL_DB_CONFIG)
     except Exception as e:
-        logger.error(f'{C_RED}加载 ACL 失败：无法连接 MySQL {ACL_DB_CONFIG["host"]}:{ACL_DB_CONFIG["port"]}: {e}{C_RESET}')
+        logger.error(f'{C_RED}加载策略失败：无法连接 MySQL {ACL_DB_CONFIG["host"]}:{ACL_DB_CONFIG["port"]}: {e}{C_RESET}')
         return False
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            # 1. ACL 策略
             cur.execute(
                 "SELECT user_id, table_name, allowed_ops FROM t_firewall_acl WHERE enabled = 1"
             )
-            rows = cur.fetchall()
+            acl_rows = cur.fetchall()
+
+            # 2. 数据资产密级
+            try:
+                cur.execute(
+                    "SELECT table_name, sensitivity_level FROM t_data_asset WHERE enabled = 1 AND column_name IS NULL"
+                )
+                asset_rows = cur.fetchall()
+            except Exception as e:
+                logger.warning(f'{C_YELLOW}t_data_asset 表查询失败（密级校验将放行所有表）：{e}{C_RESET}')
+                asset_rows = []
+
+            # 3. 用户密级
+            try:
+                cur.execute(
+                    "SELECT user_id, clearance_level FROM t_user_clearance WHERE enabled = 1"
+                )
+                clearance_rows = cur.fetchall()
+            except Exception as e:
+                logger.warning(f'{C_YELLOW}t_user_clearance 表查询失败（用户密级默认 0=公开）：{e}{C_RESET}')
+                clearance_rows = []
     except Exception as e:
-        logger.error(f'{C_RED}查询 t_firewall_acl 失败：{e}{C_RESET}')
-        logger.error('请确认已执行 firewall/acl_schema.sql 建表')
+        logger.error(f'{C_RED}查询策略表失败：{e}{C_RESET}')
+        logger.error('请确认已执行 firewall/acl_schema.sql 和 firewall/clearance_schema.sql')
         return False
     finally:
         try:
@@ -111,21 +138,41 @@ def load_acl_from_db() -> bool:
         except Exception:
             pass
 
-    new_cache: dict = {}
-    for row in rows:
+    # 构建 ACL 缓存
+    new_acl: dict = {}
+    for row in acl_rows:
         uid = row['user_id'].strip()
         tbl = row['table_name'].strip()
         ops_raw = (row['allowed_ops'] or '').strip().upper()
         ops = {o.strip() for o in ops_raw.split(',') if o.strip()}
-        new_cache.setdefault(uid, {})[tbl] = ops
+        new_acl.setdefault(uid, {})[tbl] = ops
+    _ACL_CACHE = new_acl
 
-    _ACL_CACHE = new_cache
+    # 构建数据资产密级缓存（key 全部小写，方便匹配）
+    new_asset: dict = {}
+    for row in asset_rows:
+        tbl = (row['table_name'] or '').strip().lower()
+        if tbl:
+            new_asset[tbl] = int(row['sensitivity_level'])
+    _DATA_ASSET_CACHE = new_asset
+
+    # 构建用户密级缓存
+    new_clearance: dict = {}
+    for row in clearance_rows:
+        uid = (row['user_id'] or '').strip()
+        if uid:
+            new_clearance[uid] = int(row['clearance_level'])
+    _USER_CLEARANCE_CACHE = new_clearance
+
     logger.info(
-        f'{C_GREEN}ACL 策略已加载：{len(rows)} 条规则，覆盖 {len(new_cache)} 个用户{C_RESET}'
+        f'{C_GREEN}策略已加载：ACL {len(acl_rows)} 条 / 资产密级 {len(asset_rows)} 条 / 用户密级 {len(clearance_rows)} 条{C_RESET}'
     )
-    for uid, tables in new_cache.items():
-        for tbl, ops in tables.items():
-            logger.info(f'         {uid} | {tbl} | {",".join(sorted(ops))}')
+    for uid, tables in new_acl.items():
+        logger.info(f'         ACL  | {uid} | {list(tables.keys())}')
+    if new_asset:
+        logger.info(f'         资产 | {dict(list(new_asset.items())[:10])}{"..." if len(new_asset) > 10 else ""}')
+    if new_clearance:
+        logger.info(f'         用户 | {new_clearance}')
     return True
 
 
@@ -251,6 +298,54 @@ def check_table_acl(user: str, op: str, tables: set) -> tuple:
             return False, f'用户 {user} 对 {tbl} 无 {op} 权限（仅 {",".join(sorted(allowed_ops))}）'
 
     return True, 'OK'
+
+
+# --------------- 密级校验 ---------------
+
+# 找不到用户密级时的默认 clearance
+_DEFAULT_USER_CLEARANCE = 1
+
+
+def _get_user_clearance(user: str) -> int:
+    """获取用户密级，支持通配符回退"""
+    if not user:
+        user = '*'
+    if user in _USER_CLEARANCE_CACHE:
+        return _USER_CLEARANCE_CACHE[user]
+    if '*' in _USER_CLEARANCE_CACHE:
+        return _USER_CLEARANCE_CACHE['*']
+    return _DEFAULT_USER_CLEARANCE
+
+
+def check_clearance(user: str, tables: set) -> tuple:
+    """
+    密级校验：user_clearance >= max(table.sensitivity_level)
+    返回 (allowed: bool, reason: str)
+    """
+    if not tables:
+        return True, '无表，跳过密级校验'
+
+    user_level = _get_user_clearance(user)
+
+    # 找出本次 SQL 涉及的最高密级
+    max_level = 0
+    miss_tables = []
+    for tbl in tables:
+        level = _DATA_ASSET_CACHE.get(tbl)
+        if level is None:
+            # 未标记密级的表视为 L1（公开），避免业务表全被拦
+            level = 1
+            miss_tables.append(tbl)
+        if level > max_level:
+            max_level = level
+
+    if user_level >= max_level:
+        return True, f'用户密级 {user_level} >= 表密级 {max_level}'
+
+    return False, (
+        f'用户 {user} 密级 {user_level} 不足以访问密级 {max_level} 的表 '
+        f'(需 >= {max_level})'
+    )
 
 
 # --------------- MySQL 协议解析 ---------------
@@ -433,6 +528,10 @@ class FirewallProxy:
                     # L2 表级 ACL 决策
                     op, tables = parse_sql(sql)
                     allowed, reason = check_table_acl(current_user, op, tables)
+
+                    # 密级校验（仅在 ACL 通过后做）
+                    if allowed and tables:
+                        allowed, reason = check_clearance(current_user, tables)
 
                     if allowed:
                         if LOG_SQL:
