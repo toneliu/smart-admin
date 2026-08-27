@@ -1,4 +1,4 @@
-name: Backend Release (Tag Build & Publish)
+name: Backend Release (Tag Build & Publish - includes Frontend)
 
 on:
   push:
@@ -10,8 +10,42 @@ permissions:
   contents: write
 
 jobs:
+  build-frontend:
+    name: Build Frontend (smart-admin-web-typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20 (Vite 5 requires Node >= 18)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: smart-admin-web-typescript/package.json
+
+      - name: npm install + build:prod (dist/)
+        working-directory: smart-admin-web-typescript
+        run: |
+          set -euo pipefail
+          node -v ; npm -v
+          npm install --no-audit --no-fund 2>&1 | tail -20
+          npm run build:prod 2>&1 | tail -30
+          echo ""
+          echo "=== dist/ 产物 ==="
+          ls -lah dist/
+          du -sh dist/
+
+      - name: Upload dist artifact (shared to backend jobs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-admin-web-dist
+          path: smart-admin-web-typescript/dist/**
+          retention-days: 7
+
   build-backend:
-    name: Build Backend ${{ matrix.label }}
+    name: Build Backend ${{ matrix.label }} + Frontend
+    needs: build-frontend
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,6 +75,12 @@ jobs:
           echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
           echo "semver=$SEM_VER" >> $GITHUB_OUTPUT
 
+      - name: Download frontend dist artifact into smart-admin-web-typescript/dist/
+        uses: actions/download-artifact@v4
+        with:
+          name: smart-admin-web-dist
+          path: smart-admin-web-typescript/dist
+
       - name: Setup JDK ${{ matrix.jdk }}
         uses: actions/setup-java@v4
         with:
@@ -63,7 +103,7 @@ jobs:
             -Dversion=1.0.2 \
             -Dpackaging=jar
 
-      - name: Maven Package (prod profile, skip tests)
+      - name: Maven Package (prod profile, skip tests — frontend dist auto copied via maven-resources-plugin prepare-package phase)
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -72,24 +112,33 @@ jobs:
             -DskipTests \
             --file pom.xml
 
-      - name: Verify and rename artifact
+      - name: Verify frontend is embedded + rename artifact
         id: artifact
         run: |
           set -euo pipefail
-          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.3.jar"
+          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.4.jar"
           if [ ! -f "$SRC" ]; then
             echo "❌ Build output not found: $SRC"
             echo "--- Listing ${{ matrix.dir }}/sa-admin/target/ ---"
             ls -la "${{ matrix.dir }}/sa-admin/target/" || true
             exit 1
           fi
+          echo "✅ JAR: $SRC ($(du -h $SRC | cut -f1))"
+          echo "=== 前端资源（BOOT-INF/classes/static 条目样例） ==="
+          unzip -l "$SRC" 2>/dev/null | grep -E "BOOT-INF/classes/static/(index\.html|js/|css/|assets/|favicon|vue)" | head -20 || true
+          if ! unzip -l "$SRC" | grep -q "BOOT-INF/classes/static/index.html"; then
+            echo "❌ 致命：后端 JAR 中未发现前端 index.html（static/ 未集成）"
+            exit 1
+          fi
+          echo "✅ 前端已嵌入：BOOT-INF/classes/static/index.html 存在"
+
           DIR="release-artifacts"
           mkdir -p "$DIR"
           OUTPUT="${DIR}/${{ matrix.output_name }}"
           cp "$SRC" "$OUTPUT"
           VERSIONED="${DIR}/$(basename $OUTPUT .jar)-${{ steps.info.outputs.semver }}.jar"
           cp "$SRC" "$VERSIONED"
-          echo "✅ Produced:"
+          echo "✅ Produced release artifacts:"
           ls -lah "$OUTPUT" "$VERSIONED"
           SHA256=$(sha256sum "$OUTPUT" | awk '{print $1}')
           echo "sha256=$SHA256"
@@ -145,16 +194,40 @@ jobs:
         id: notes
         run: |
           cat > RELEASE_BODY.md << 'NOTES_EOF'
-          ## SmartAdmin 后端发布包
+          ## SmartAdmin 前后端一体化发布包
           
-          本 Release 由 GitHub Actions 自动构建，包含两个后端版本的 Spring Boot 可执行 JAR（prod profile）。
+          🎉 **新特性：前端（Vue 3 + Vite + TypeScript 版）已集成到后端可执行 JAR 内！**
+          现在 `java -jar xxx.jar` 之后，直接在浏览器访问同一端口即可打开前端页面，
+          不需要再单独用 nginx 部署前端静态资源，也不需要配置跨域。
           
-          **firewall-jdbc 引入方式（v1.0.3 新方案）**：
-          直接从 firewall-jdbc 项目的 GitHub Release 下载官方 JAR（v1.0.2），
-          通过 `mvn install:install-file` 安装到本地 Maven 仓库，再按标准 Maven 坐标 `com.firewall:firewall-jdbc:1.0.2` 引用。
-          ❌ 不使用 GitHub Packages（免 PAT、免认证）
-          ❌ 不内联 firewall-jdbc 源码（保持独立 jar）
-          ✅ FirewallIdentityFilter 保留：从 Sa-Token 会话取用户 ID → FirewallContextHolder ThreadLocal → FirewallDriver.connect() 注入
+          ### 集成方式
+          | 组件 | 来源 |
+          |---|---|
+          | 前端 | smart-admin-web-typescript（Vite build:prod → dist/） |
+          | 后端 JAR 内嵌 | maven-resources-plugin prepare-package 阶段自动 copy 到 BOOT-INF/classes/static/ |
+          | 静态资源访问 | Spring Boot 默认 `classpath:static/**` 自动暴露 |
+          | 前端路由 | `createWebHashHistory()`（Hash 模式），不需要后端 forward index.html |
+          | 后端 context-path | `/`（默认根路径） |
+          | 端口 | 1024（可通过 `--server.port=xxxx` 覆盖） |
+          | 前端 API 请求 | `VITE_APP_API_URL=''`（同源相对路径，**零跨域**），axios 自动打同端口 API |
+          | firewall-jdbc 驱动 | 直接从 GitHub Release `v1.0.2/firewall-jdbc-1.0.2.jar` 下载 → `mvn install:install-file` 引入 |
+          
+          ### 启动方式（前后端一站式）
+          ```bash
+          # Java 17 + Spring Boot 3 版本（推荐新环境）
+          java -jar smart-admin-backend-java17-springboot3.jar \
+            --spring.profiles.active=prod \
+            --spring.datasource.druid.url=jdbc:mysql://localhost:3306/smart_admin_v3?autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai \
+            --spring.datasource.druid.username=root \
+            --spring.datasource.druid.password=your_password \
+            --server.port=1024
+          # 启动后浏览器直接打开: http://服务器IP:1024/   （就是前端页面！）
+          # 后端 API 同端口同域名自动服务，不需要额外代理
+          
+          # Java 8 + Spring Boot 2 版本（兼容旧环境）
+          java -jar smart-admin-backend-java8-springboot2.jar \
+            --spring.profiles.active=prod
+          ```
           
           ### 产物清单
           NOTES_EOF
@@ -174,26 +247,13 @@ jobs:
           
           cat >> RELEASE_BODY.md << 'NOTES_EOF'
           
-          ### 启动方式
-          ```bash
-          # Java 17 + Spring Boot 3 版本（推荐新环境）
-          java -jar smart-admin-backend-java17-springboot3.jar \
-            --spring.profiles.active=prod \
-            --spring.datasource.druid.url=jdbc:mysql://localhost:3306/smart_admin?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai \
-            --spring.datasource.druid.username=root \
-            --spring.datasource.druid.password=your_password
-          
-          # Java 8 + Spring Boot 2 版本（兼容旧环境）
-          java -jar smart-admin-backend-java8-springboot2.jar \
-            --spring.profiles.active=prod
-          ```
-          
-          ### 本次修复（sa-v1.0.3 对比 sa-v1.0.2）
-          - **修复 Java 17+SB3 编译失败**：FirewallIdentityFilter 的 Servlet 包名从 `javax.servlet.*` 改为 `jakarta.servlet.*`（Spring Boot 3 基于 Jakarta EE 9+，命名空间变更）。Java 8+SB2 版本仍保持 `javax.servlet.*` 不变。
-          - **firewall-jdbc 引入改为直接引用 Release JAR**（如上述说明）：不需要 GitHub Packages Token，不需要 CI 配置任何 Secrets，公开 URL 即可拉取。
-          - SmartAdmin 源码版本统一：3.0.3
-          - firewall-jdbc 驱动版本：com.firewall:firewall-jdbc:1.0.2（由 toneliu/firewall-jdbc Release 提供）
-          - 旧版 Release：sa-v1.0.0 / sa-v1.0.1 / sa-v1.0.2 全部完整保留，不做删除
+          ### sa-v1.0.4 变更摘要（对比 sa-v1.0.3）
+          - 🎉 **前后端一体化打包**：前端 TypeScript 版（Vue 3 + Vite + Ant Design Vue 4）编译后嵌入 Spring Boot fat JAR 的 `BOOT-INF/classes/static/`，启动后 `http://host:1024/` 直接访问
+          - 🔌 **API 同源**：`.env.production` 将 `VITE_APP_API_URL` 从官方 demo 域名改为空字符串，前端 axios 请求走相对路径，与后端共享同端口+域名，**零跨域零配置**
+          - 🔐 **防火墙身份透传保持不变**：FirewallDriver + FirewallIdentityFilter 仍按 Sa-Token 登录态 → FirewallContextHolder ThreadLocal → JDBC FirewallIdentityComment 注入路径
+          - 📦 **依赖**：firewall-jdbc 仍按 `com.firewall:firewall-jdbc:1.0.2` 从 GitHub Release JAR 安装，不使用 GitHub Packages
+          - 📌 SmartAdmin 源码版本统一：3.0.4
+          - ✅ 旧 Release：sa-v1.0.0 / sa-v1.0.1 / sa-v1.0.2 / sa-v1.0.3 全部完整保留，不删除
           NOTES_EOF
           
           cat RELEASE_BODY.md
@@ -201,7 +261,7 @@ jobs:
       - name: Create GitHub Release & Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          name: SmartAdmin Backend ${{ github.ref_name }}
+          name: SmartAdmin (前后端一体化) ${{ github.ref_name }}
           body_path: RELEASE_BODY.md
           files: |
             release-staging/*.jar
