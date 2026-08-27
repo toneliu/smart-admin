@@ -4,12 +4,12 @@
     <parent>
         <groupId>net.lab1024</groupId>
         <artifactId>sa-parent</artifactId>
-        <version>3.0.4</version>
+        <version>3.0.5</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>sa-admin</artifactId>
-    <version>3.0.4</version>
+    <version>3.0.5</version>
     <packaging>jar</packaging>
 
     <name>sa-admin</name>
@@ -20,7 +20,7 @@
         <dependency>
             <groupId>net.lab1024</groupId>
             <artifactId>sa-base</artifactId>
-            <version>3.0.4</version>
+            <version>3.0.5</version>
         </dependency>
 
     </dependencies>
@@ -59,22 +59,21 @@
                 </execution>
             </executions>
         </plugin>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <mainClass>net.lab1024.sa.admin.AdminApplication</mainClass>
-                </configuration>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
+        <plugin>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-maven-plugin</artifactId>
+            <configuration>
+                <mainClass>net.lab1024.sa.admin.AdminApplication</mainClass>
+            </configuration>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>repackage</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+    </plugins>
     </build>
 
 </project>
