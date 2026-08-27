@@ -4,12 +4,12 @@
     <parent>
         <groupId>net.lab1024</groupId>
         <artifactId>sa-parent</artifactId>
-        <version>3.0.3</version>
+        <version>3.0.4</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>sa-admin</artifactId>
-    <version>3.0.3</version>
+    <version>3.0.4</version>
     <packaging>jar</packaging>
 
     <name>sa-admin</name>
@@ -20,12 +20,45 @@
         <dependency>
             <groupId>net.lab1024</groupId>
             <artifactId>sa-base</artifactId>
-            <version>3.0.3</version>
+            <version>3.0.4</version>
         </dependency>
 
     </dependencies>
 
     <build>
+    <resources>
+        <resource>
+            <directory>src/main/resources</directory>
+            <filtering>true</filtering>
+        </resource>
+    </resources>
+    <plugins>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-resources-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+                <execution>
+                    <id>copy-frontend-dist</id>
+                    <phase>prepare-package</phase>
+                    <goals>
+                        <goal>copy-resources</goal>
+                    </goals>
+                    <configuration>
+                        <outputDirectory>${project.build.outputDirectory}/static</outputDirectory>
+                        <overwrite>true</overwrite>
+                        <resources>
+                            <resource>
+                                <directory>${project.basedir}/../../smart-admin-web-typescript/dist</directory>
+                                <includes>
+                                    <include>**/*</include>
+                                </includes>
+                            </resource>
+                        </resources>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
