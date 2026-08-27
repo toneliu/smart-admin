@@ -108,6 +108,7 @@ jobs:
 
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html → frontend integrated)
         run: |
+          set -euo pipefail
           JAR="sa-admin/target/sa-admin-dev-3.0.5.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
@@ -116,10 +117,14 @@ jobs:
           fi
           echo "✅ JAR found: $JAR ($(du -h $JAR | cut -f1))"
           echo ""
-          echo "=== JAR 内前端资源 (BOOT-INF/classes/static) ==="
-          unzip -l "$JAR" | grep -E "BOOT-INF/classes/static/(index\.html|js/|css/|assets/|favicon)" | head -30 || true
+          echo "=== JAR 内前端资源 (BOOT-INF/classes/static 前 30 条) ==="
+          # 避免 SIGPIPE：先 unzip -l 输出到临时文件，再 grep+head 显示
+          unzip -l "$JAR" > /tmp/jar_listing.txt 2>/dev/null || true
+          grep -E "BOOT-INF/classes/static/(index\.html|js/|css/|assets/|favicon)" /tmp/jar_listing.txt | head -30 || true
+          rm -f /tmp/jar_listing.txt
           echo ""
-          if unzip -p "$JAR" BOOT-INF/classes/static/index.html | head -3 | grep -q "SmartAdmin\|Vite\|html"; then
+          # 用 unzip -l（不触发 SIGPIPE） 确认 index.html 条目存在
+          if unzip -l "$JAR" 2>/dev/null | grep -q "BOOT-INF/classes/static/index.html"; then
             echo "✅ index.html 内嵌于 JAR 的 static/ 中 —— 前端已成功集成"
           else
             echo "❌ 未找到 BOOT-INF/classes/static/index.html，前端未集成"
@@ -172,6 +177,7 @@ jobs:
 
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html)
         run: |
+          set -euo pipefail
           JAR="sa-admin/target/sa-admin-dev-3.0.5.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
@@ -179,9 +185,13 @@ jobs:
             exit 1
           fi
           echo "✅ JAR found: $JAR ($(du -h $JAR | cut -f1))"
-          if unzip -l "$JAR" | grep -q "BOOT-INF/classes/static/index.html"; then
+          # 避免 SIGPIPE + pipefail：落盘后判定
+          unzip -l "$JAR" > /tmp/java8_jar_list.txt 2>/dev/null
+          if grep -q "BOOT-INF/classes/static/index.html" /tmp/java8_jar_list.txt; then
             echo "✅ index.html 内嵌于 JAR 的 static/ 中 —— 前端已成功集成"
           else
             echo "❌ 未找到 BOOT-INF/classes/static/index.html，前端未集成"
+            rm -f /tmp/java8_jar_list.txt
             exit 1
           fi
+          rm -f /tmp/java8_jar_list.txt

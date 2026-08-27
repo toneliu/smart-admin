@@ -125,11 +125,18 @@ jobs:
           fi
           echo "✅ JAR: $SRC ($(du -h $SRC | cut -f1))"
           echo "=== 前端资源（BOOT-INF/classes/static 条目样例） ==="
-          unzip -l "$SRC" 2>/dev/null | grep -E "BOOT-INF/classes/static/(index\.html|js/|css/|assets/|favicon|vue)" | head -20 || true
-          if ! unzip -l "$SRC" | grep -q "BOOT-INF/classes/static/index.html"; then
+          # 避免 SIGPIPE + pipefail 竞态：先落盘再 grep/head
+          unzip -l "$SRC" > /tmp/rel_jar_listing.txt 2>/dev/null || true
+          grep -E "BOOT-INF/classes/static/(index\.html|js/|css/|assets/|favicon|vue)" /tmp/rel_jar_listing.txt | head -20 || true
+          rm -f /tmp/rel_jar_listing.txt
+          # 用临时文件判定，完全避免管道 SIGPIPE
+          unzip -l "$SRC" > /tmp/rel_check.txt 2>/dev/null
+          if ! grep -q "BOOT-INF/classes/static/index.html" /tmp/rel_check.txt; then
             echo "❌ 致命：后端 JAR 中未发现前端 index.html（static/ 未集成）"
+            rm -f /tmp/rel_check.txt
             exit 1
           fi
+          rm -f /tmp/rel_check.txt
           echo "✅ 前端已嵌入：BOOT-INF/classes/static/index.html 存在"
 
           DIR="release-artifacts"
