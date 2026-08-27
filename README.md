@@ -340,6 +340,189 @@ sudo journalctl -u smart-admin -f   # 实时查看日志
 
 ---
 
+### 🛡️ 数据库防火墙方案
+
+> 终端用户身份透传到 SQL 执行层 + 在数据库前增加一层代理做 SQL 审计与 ACL 控制，让 DBA / 安全团队能看到「**是哪个业务用户执行了哪条 SQL**」，并能按用户拦截危险 SQL。
+
+#### 1. 为什么需要
+
+传统架构下，所有业务用户共用同一个数据库账号（如 `root` / `app_sa`）通过连接池访问 MySQL，数据库侧只能看到 `root` 在执行 SQL，无法区分是哪个终端用户。一旦出现误删/越权/恶意 SQL，无法追溯到具体操作人。
+
+本方案在不改造业务代码的前提下，通过 **HTTP 拦截器 + ThreadLocal + MyBatis 拦截器 + MySQL 会话变量 + Python 代理防火墙** 五层串联，把当前登录用户身份注入到每一条 SQL 的会话上下文中，并在数据库前再加一层可独立部署、可独立升级的防火墙代理。
+
+#### 2. 架构总览
+
+```
+浏览器
+  │  登录（admin/123456）
+  ▼
+Nginx → server.port(1024)  Spring Boot / Tomcat
+                                │
+                                ▼
+            DispatcherServlet → FirewallIdentityInterceptor
+                                │  ① 从 Sa-Token 取 userId
+                                ▼
+                  FirewallContextHolder (ThreadLocal)
+                                │
+                                ▼
+                     Controller → Service → Manager
+                                │
+                                ▼
+                  MyBatis-Plus Mapper
+                                │
+                                ▼
+                  FirewallMyBatisInterceptor
+                                │  ② 每次执行 SQL 前，
+                                │     先发 SET @firewall_user = '<userId>'
+                                ▼
+                  Druid DataSource (连接池)
+                                │
+                                ▼
+                  MySQL JDBC Driver
+                                │
+                                ▼  ③ 所有 SQL 流经防火墙代理
+              ┌──────────────────────────────────┐
+              │ firewall/mysql_firewall.py        │
+              │   - TCP 代理 3306 → 真实 3308     │
+              │   - 解析 SET 语句，更新 session   │
+              │   - SQL 审计 / ACL 拦截           │
+              └──────────────────────────────────┘
+                                │
+                                ▼
+                       真实 MySQL (3308)
+              （会话变量 @firewall_user 在此生效）
+```
+
+#### 3. 核心组件清单
+
+| 层级 | 文件 | 作用 |
+|---|---|---|
+| HTTP 入口 | [sa-admin/.../interceptor/FirewallIdentityInterceptor.java](smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/interceptor/FirewallIdentityInterceptor.java) | 在 DispatcherServlet 内从 `StpUtil.getLoginId()` 取出 userId（处理 Sa-Token 多账号格式 `1:1` → `1`），写入 ThreadLocal；请求结束在 `afterCompletion` 清理 |
+| ThreadLocal 容器 | `FirewallContextHolder`（来自 firewall-jdbc 依赖） | 暴露 `setCurrentUser` / `getCurrentUser` 静态方法，请求线程内共享身份 |
+| SQL 注入 | [sa-base/.../config/FirewallMyBatisInterceptor.java](smart-admin-api-java17-springboot3/sa-base/src/main/java/net/lab1024/sa/base/config/FirewallMyBatisInterceptor.java) | MyBatis `StatementHandler.prepare` 拦截器；在执行业务 SQL 前，先用当前 Connection 发 `SET @firewall_user = '<safeUser>'`，再做字符过滤防 SQL 注入 |
+| 拦截器注册 | [sa-admin/.../config/MvcConfig.java](smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/config/MvcConfig.java) | 先注册 `FirewallIdentityInterceptor`，再注册 `AdminInterceptor`（鉴权），保证身份先于鉴权注入 |
+| 数据库代理 | [firewall/mysql_firewall.py](firewall/mysql_firewall.py) | Python 异步 TCP 代理，监听 `0.0.0.0:3306` 转发到真实 MySQL `127.0.0.1:3308`；解析握手包连接属性 + 跟踪 `SET @firewall_user` 语句；提供 SQL 审计日志 + 按 user 的 ACL 拦截 |
+
+#### 4. 运行原理详解
+
+**应用侧（身份注入）**
+
+1. 用户登录后，Sa-Token 把 `loginId` 写入会话；HTTP 请求进入 `DispatcherServlet` 后，`FirewallIdentityInterceptor.preHandle()` 调用 `StpUtil.getLoginId()` 拿到 userId（多账号体系返回 `"1:1"`，只取冒号后的纯 userId），写入 `FirewallContextHolder` 的 ThreadLocal。
+2. 业务代码调用 MyBatis 执行 SQL，触发 `FirewallMyBatisInterceptor.intercept()`：
+   - 从 ThreadLocal 取当前 userId；
+   - 用 `replaceAll("[^a-zA-Z0-9_\\-]", "")` 过滤危险字符；
+   - 在当前 Connection 上执行 `SET @firewall_user = '<safeUser>'`；
+   - `proceed()` 继续执行原业务 SQL。
+3. `FirewallIdentityInterceptor.afterCompletion()` 清理 ThreadLocal，防止线程复用导致身份串号。
+
+**MySQL 侧（会话变量）**
+
+- `@firewall_user` 是 MySQL 的 **会话用户变量**（session user variable）：
+  - 命名以 `@` 开头，**不属于任何表，不持久化**，只在当前数据库连接的会话内存里有效；
+  - 同一连接后续任何 SQL 都能 `SELECT @firewall_user` 读到；
+  - 连接一断开，变量立即消失；
+  - 因此非常适合用作「连接级身份标记」——每次从连接池拿到连接时设置一次，后续该连接上的所有 SQL 自动带上身份。
+
+**防火墙侧（身份识别 + 审计 + ACL）**
+
+- Python 代理在 TCP 层拦截所有客户端 → MySQL 的字节流，按 MySQL 协议解析：
+  - 握手阶段：解析客户端握手响应包，从连接属性 `attrs['firewall_user']` 取初始身份（兼容 JDBC `connectionAttributes`）；
+  - 命令阶段：拦截 `COM_QUERY` (0x03) 命令，用宽松正则匹配 `@+firewall_user\s*=\s*'([^']*)'`（兼容 Connector/J 8.x 可能的注释前缀和 `@@session.` 前缀）；
+  - 一旦识别到 `SET @firewall_user = 'xxx'`，更新本连接的 `session['firewall_user']`，后续所有 SQL 都会被打上 `user=xxx` 标签输出到审计日志；
+  - 如果用户命中 ACL 规则，直接构造 MySQL Error 包（错误码 1142）回给客户端，**不会转发到真实 MySQL**。
+
+#### 5. 部署步骤
+
+**Step 1：启动 Python 防火墙代理**（部署在 MySQL 同机或同 VPC 内）
+
+```bash
+# 默认监听 0.0.0.0:3306，转发到 127.0.0.1:3308
+python3 firewall/mysql_firewall.py
+```
+
+如需修改监听/上游端口/ACL，直接编辑脚本顶部常量：
+
+```python
+LISTEN_HOST = '0.0.0.0'
+LISTEN_PORT = 3306          # 防火墙监听端口
+MYSQL_HOST  = '127.0.0.1'
+MYSQL_PORT  = 3308          # 真实 MySQL 端口
+ACL_RULES = { ... }        # 见第 6 节
+LOG_SQL    = True           # 是否记录 SQL
+```
+
+**Step 2：让真实 MySQL 只监听内网/本地**
+
+修改 `my.cnf`：
+
+```ini
+[mysqld]
+# 不要让 3308 暴露给业务网段；只接受防火墙所在主机的连接
+bind-address = 127.0.0.1
+port = 3308
+```
+
+**Step 3：修改应用 JDBC URL 走防火墙**
+
+把 `--spring.datasource.druid.url` 的端口从真实 MySQL 端口改成防火墙监听端口：
+
+```bash
+--spring.datasource.druid.url='jdbc:mysql://127.0.0.1:3306/smart_admin_v3?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowMultiQueries=true'
+```
+
+> 不需要换驱动类，仍然用 `com.mysql.cj.jdbc.Driver`。firewall-jdbc 驱动仅是可选增强项，让身份信息通过 JDBC 连接属性在握手阶段一次性传入，本方案主要走 `SET @firewall_user` 这条路径。
+
+**Step 4：验证**
+
+启动应用并登录后，防火墙控制台应输出：
+
+```
+[#1] 连接建立: db_user=root, firewall_user=unknown, db=smart_admin_v3, from=...
+[#1] 身份切换: unknown → 1
+[#1] QUERY [user=1]: select * from t_employee where employee_id = ?
+[#1] QUERY [user=1]: update t_employee set ... where employee_id = 1
+```
+
+若 `user=` 仍为 `unknown`，对照 [firewall/mysql_firewall.py](firewall/mysql_firewall.py) 中的 DEBUG SQL hex / raw 日志确认 Connector/J 实际下发的 SQL 文本（可能含前缀注释）。
+
+#### 6. ACL 规则配置
+
+`ACL_RULES` 是一个 `firewall_user → 规则` 的字典，**默认为空 = 监控模式（只审计不拦截）**。示例：
+
+```python
+ACL_RULES = {
+    # 禁止 admin（userId=1）执行 DROP / TRUNCATE / DELETE FROM
+    '1': {
+        'deny_sql': ['DROP', 'TRUNCATE', 'DELETE FROM'],
+    },
+    # 只允许 operator（userId=2）执行 SELECT
+    '2': {
+        'allow_sql': ['SELECT'],
+    },
+}
+```
+
+匹配规则：对 SQL 去除前后空格并转大写后，按 `startswith` 前缀匹配。命中 `deny_sql` 直接拒绝；若配置了 `allow_sql` 则只允许命中的前缀，其余拒绝。
+
+被拦截的 SQL 不会到达 MySQL，客户端会收到：
+
+```
+Error 1142: Firewall: SQL blocked - 命中拒绝规则: DROP
+```
+
+#### 7. 故障排查
+
+| 现象 | 可能原因 | 解决方法 |
+|---|---|---|
+| 防火墙日志 `QUERY [user=unknown]` 一直不变 | 旧版防火墙用 `startswith` 严格匹配，Connector/J 加了注释前缀没识别到 | 更新到最新 `firewall/mysql_firewall.py`，已改用宽松正则匹配；参考 DEBUG SQL hex 日志看真实 SQL 文本 |
+| 防火墙日志完全没有 `身份切换`，但应用日志有 `FirewallMyBatisInterceptor: SET @firewall_user = '1'` | 应用直连了 3308，绕过防火墙 | 确认应用 JDBC URL 端口指向防火墙 `3306` 而不是真实 MySQL `3308` |
+| 应用报错 `Unable to create initial connections of pool` | 防火墙进程未启动 / 端口冲突 | `lsof -i :3306` 应能看到 `python3`；防火墙脚本输出 `MySQL 防火墙代理启动` |
+| SET 走了但 `SELECT @firewall_user` 在 MySQL 里读不到 | 连接池复用 + 异步：SET 在某个连接执行，业务 SQL 复用了另一个池中连接 | 已经由 `FirewallMyBatisInterceptor` 在每次 `StatementHandler.prepare` 时针对**当前** Connection 发送 SET 解决；若仍异常，检查 MyBatis 拦截器是否生效（应用日志 `FirewallMyBatisInterceptor: SET @firewall_user = ...`） |
+| `FirewallIdentityInterceptor: StpUtil exception: SaTokenContext 上下文尚未初始化` | 拦截器在 DispatcherServlet 之前被调用（旧版用了 Filter） | 当前方案已改为 `HandlerInterceptor`，在 DispatcherServlet 内执行；如仍报错检查 [MvcConfig.java](smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/config/MvcConfig.java) 注册顺序 |
+| `user=1:1`（多账号 ID 格式） | Sa-Token 多账号体系返回 `"userType:userId"` | [FirewallIdentityInterceptor.java](smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/interceptor/FirewallIdentityInterceptor.java) 已用 `lastIndexOf(":")` 取冒号后部分 |
+
+---
+
 ### 🧱 架构调用链回顾
 
 ```
