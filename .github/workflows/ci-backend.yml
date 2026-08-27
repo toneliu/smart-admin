@@ -109,7 +109,7 @@ jobs:
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html → frontend integrated)
         run: |
           set -euo pipefail
-          JAR="sa-admin/target/sa-admin-dev-3.0.9.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.10.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
@@ -178,7 +178,7 @@ jobs:
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html)
         run: |
           set -euo pipefail
-          JAR="sa-admin/target/sa-admin-dev-3.0.9.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.10.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
