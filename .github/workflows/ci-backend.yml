@@ -79,7 +79,7 @@ jobs:
           path: smart-admin-web-typescript/dist
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -108,7 +108,7 @@ jobs:
 
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html → frontend integrated)
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.4.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.5.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true
@@ -144,7 +144,7 @@ jobs:
           path: smart-admin-web-typescript/dist
 
       - name: Setup JDK 8
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '8'
           distribution: 'temurin'
@@ -172,7 +172,7 @@ jobs:
 
       - name: Verify artifact (JAR contains BOOT-INF/classes/static/index.html)
         run: |
-          JAR="sa-admin/target/sa-admin-dev-3.0.4.jar"
+          JAR="sa-admin/target/sa-admin-dev-3.0.5.jar"
           if [ ! -f "$JAR" ]; then
             echo "❌ Expected JAR not found: $JAR"
             ls -la sa-admin/target/ || true

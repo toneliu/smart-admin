@@ -82,7 +82,7 @@ jobs:
           path: smart-admin-web-typescript/dist
 
       - name: Setup JDK ${{ matrix.jdk }}
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: ${{ matrix.jdk }}
           distribution: 'temurin'
@@ -116,7 +116,7 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.4.jar"
+          SRC="${{ matrix.dir }}/sa-admin/target/sa-admin-prod-3.0.5.jar"
           if [ ! -f "$SRC" ]; then
             echo "❌ Build output not found: $SRC"
             echo "--- Listing ${{ matrix.dir }}/sa-admin/target/ ---"
@@ -247,13 +247,15 @@ jobs:
           
           cat >> RELEASE_BODY.md << 'NOTES_EOF'
           
-          ### sa-v1.0.4 变更摘要（对比 sa-v1.0.3）
-          - 🎉 **前后端一体化打包**：前端 TypeScript 版（Vue 3 + Vite + Ant Design Vue 4）编译后嵌入 Spring Boot fat JAR 的 `BOOT-INF/classes/static/`，启动后 `http://host:1024/` 直接访问
-          - 🔌 **API 同源**：`.env.production` 将 `VITE_APP_API_URL` 从官方 demo 域名改为空字符串，前端 axios 请求走相对路径，与后端共享同端口+域名，**零跨域零配置**
+          ### sa-v1.0.5 变更摘要（对比 sa-v1.0.4）
+          - 🐛 **修复 sa-v1.0.4 CI 构建失败**：Java 17+SpringBoot3 / Java 8+SpringBoot2 两个 sa-admin 模块的 `pom.xml` 存在 `<plugins>` 标签双重嵌套，导致 Maven 无法解析 POM 直接抛 `ModelParseException`（错误信息：`Non-parseable POM: Unrecognised tag: 'plugins' @ line 62`）。本次修复已将 spring-boot-maven-plugin 移至第一层 `<plugins>` 下与 maven-resources-plugin 并列。
+          - 🎉 **前后端一体化打包**（继承 sa-v1.0.4 特性）：前端 TypeScript 版（Vue 3 + Vite + Ant Design Vue 4）编译后嵌入 Spring Boot fat JAR 的 `BOOT-INF/classes/static/`，启动后 `http://host:1024/` 直接访问
+          - 🔌 **API 同源**（继承 sa-v1.0.4 特性）：`.env.production` 将 `VITE_APP_API_URL` 改为空字符串，前端 axios 请求走相对路径，与后端共享同端口+域名，**零跨域零配置**
+          - 🔧 **GitHub Actions 去 deprecated 警告**：`actions/setup-java` 从 v4 升级到 v5
           - 🔐 **防火墙身份透传保持不变**：FirewallDriver + FirewallIdentityFilter 仍按 Sa-Token 登录态 → FirewallContextHolder ThreadLocal → JDBC FirewallIdentityComment 注入路径
-          - 📦 **依赖**：firewall-jdbc 仍按 `com.firewall:firewall-jdbc:1.0.2` 从 GitHub Release JAR 安装，不使用 GitHub Packages
-          - 📌 SmartAdmin 源码版本统一：3.0.4
-          - ✅ 旧 Release：sa-v1.0.0 / sa-v1.0.1 / sa-v1.0.2 / sa-v1.0.3 全部完整保留，不删除
+          - 📦 **依赖**：firewall-jdbc 仍按 `com.firewall:firewall-jdbc:1.0.2` 从 GitHub Release JAR 下载 → `mvn install:install-file` 引入
+          - 📌 SmartAdmin 源码版本统一：3.0.5
+          - ✅ 旧 Release：sa-v1.0.0 / sa-v1.0.1 / sa-v1.0.2 / sa-v1.0.3 / sa-v1.0.4 全部完整保留，不删除
           NOTES_EOF
           
           cat RELEASE_BODY.md
