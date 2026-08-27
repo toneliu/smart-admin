@@ -1,42 +1,57 @@
 #!/usr/bin/env python3
 """
-简易 MySQL 数据库防火墙代理
+简易 MySQL 数据库防火墙代理（L2：表级 ACL）
 
 功能：
   1. TCP 代理：监听 3306，转发到真实 MySQL 3308
-  2. 身份提取：从 MySQL 连接属性中解析 firewall_user 字段
-  3. SQL 审计：记录每条 SQL 及其执行者
-  4. ACL 控制：按用户拦截危险 SQL（DROP/DELETE/TRUNCATE 等）
+  2. 身份提取：从 MySQL 连接属性 + SET @firewall_user 会话变量解析当前操作用户
+  3. SQL 解析：用 sqlparse 提取 SQL 的操作类型 + 涉及的表
+  4. ACL 控制：按 (userId, 表名, 操作类型) 三维矩阵查 t_firewall_acl 表决策，拒绝的 SQL 不转发
+  5. SQL 审计：记录每条 SQL 及其执行者
+  6. 策略热加载：向进程发送 SIGUSR1 信号即可重新拉取 ACL 策略
 
 使用方法：
-  1. 启动防火墙：  python3 mysql_firewall.py
-  2. 修改应用 JDBC URL 端口为 3306：
-     jdbc:mysql://localhost:3306/smart_admin_v3?...
-  3. 登录系统后查看防火墙日志，确认 firewall_user 身份已透传
+  1. 在 MySQL 上执行 firewall/acl_schema.sql 建 t_firewall_acl 表
+  2. 安装依赖：pip3 install sqlparse pymysql
+  3. 修改下方 ACL_DB_CONFIG 指向你真实的 MySQL（3308）
+  4. 启动防火墙：python3 firewall/mysql_firewall.py
+  5. 修改应用 JDBC URL 端口为 3306：jdbc:mysql://localhost:3306/smart_admin_v3?...
+  6. 修改 ACL 策略后，发送信号热加载：pkill -SIGUSR1 -f mysql_firewall.py
 """
 
 import asyncio
-import re
-import struct
 import logging
+import re
+import signal
+import struct
 import sys
+from functools import lru_cache
+
+import pymysql
+import sqlparse
+from sqlparse.sql import Identifier, IdentifierList, Parenthesis, Where
 
 # ==================== 配置 ====================
 LISTEN_HOST = '0.0.0.0'
 LISTEN_PORT = 3306          # 防火墙监听端口
 MYSQL_HOST  = '127.0.0.1'
-MYSQL_PORT  = 3308          # 真实 MySQL 端口
+MYSQL_PORT  = 3308          # 真实 MySQL 端口（应用经防火墙转发到这里）
 
-# ACL 规则：firewall_user → 允许/拒绝的 SQL 前缀
-# 空 = 监控模式（只记录不拦截）
-ACL_RULES = {
-    # 示例：禁止 admin 用户执行 DROP/TRUNCATE
-    # '1': {
-    #     'deny_sql': ['DROP', 'TRUNCATE', 'DELETE FROM'],
-    # },
+# ACL 策略数据库连接（用于读取 t_firewall_acl 表，建议用只读账号）
+ACL_DB_CONFIG = {
+    'host':             '127.0.0.1',
+    'port':             3308,
+    'user':             'root',
+    'password':         'root',
+    'database':         'smart_admin_v3',
+    'charset':          'utf8mb4',
+    'connect_timeout':  5,
 }
 
-LOG_SQL = True               # 是否记录 SQL
+# 解析失败时的默认行为：True=放行（监控模式），False=拒绝（严格模式）
+ALLOW_ON_PARSE_FAIL = True
+
+LOG_SQL = True               # 是否记录每条 SQL
 # ===============================================
 
 # MySQL 能力标志位
@@ -57,6 +72,185 @@ logging.basicConfig(
     datefmt='%H:%M:%S',
 )
 logger = logging.getLogger('Firewall')
+
+
+# --------------- ACL 策略加载 ---------------
+
+# 内存中的策略缓存：{ user_id: { table_name: set(allowed_ops) } }
+# 表名/用户都支持 '*' 通配符
+_ACL_CACHE: dict = {}
+
+# 标记是否正在加载，防止并发触发
+_LOADING_FLAG = False
+
+
+def load_acl_from_db() -> bool:
+    """
+    从 t_firewall_acl 表加载策略到内存
+    返回是否加载成功
+    """
+    global _ACL_CACHE
+    try:
+        conn = pymysql.connect(**ACL_DB_CONFIG)
+    except Exception as e:
+        logger.error(f'{C_RED}加载 ACL 失败：无法连接 MySQL {ACL_DB_CONFIG["host"]}:{ACL_DB_CONFIG["port"]}: {e}{C_RESET}')
+        return False
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                "SELECT user_id, table_name, allowed_ops FROM t_firewall_acl WHERE enabled = 1"
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.error(f'{C_RED}查询 t_firewall_acl 失败：{e}{C_RESET}')
+        logger.error('请确认已执行 firewall/acl_schema.sql 建表')
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    new_cache: dict = {}
+    for row in rows:
+        uid = row['user_id'].strip()
+        tbl = row['table_name'].strip()
+        ops_raw = (row['allowed_ops'] or '').strip().upper()
+        ops = {o.strip() for o in ops_raw.split(',') if o.strip()}
+        new_cache.setdefault(uid, {})[tbl] = ops
+
+    _ACL_CACHE = new_cache
+    logger.info(
+        f'{C_GREEN}ACL 策略已加载：{len(rows)} 条规则，覆盖 {len(new_cache)} 个用户{C_RESET}'
+    )
+    for uid, tables in new_cache.items():
+        for tbl, ops in tables.items():
+            logger.info(f'         {uid} | {tbl} | {",".join(sorted(ops))}')
+    return True
+
+
+def _handle_sigusr1(signum, frame):
+    """SIGUSR1 信号：热重新加载 ACL 策略"""
+    global _LOADING_FLAG
+    if _LOADING_FLAG:
+        return
+    _LOADING_FLAG = True
+    logger.info(f'{C_YELLOW}收到 SIGUSR1，重新加载 ACL 策略...{C_RESET}')
+    try:
+        load_acl_from_db()
+    finally:
+        _LOADING_FLAG = False
+
+
+# --------------- SQL 解析 ---------------
+
+# DDL 关键字集合
+_DDL_KEYWORDS = {'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME'}
+
+
+@lru_cache(maxsize=4096)
+def parse_sql(sql: str):
+    """
+    解析 SQL，返回 (operation, tables)
+    operation: SELECT/INSERT/UPDATE/DELETE/DDL/OTHER
+    tables: set[str]，SQL 涉及的表名集合（小写）
+    """
+    sql_stripped = sql.strip().rstrip(';').strip()
+    if not sql_stripped:
+        return 'OTHER', set()
+
+    first_token = sql_stripped.split(None, 1)[0].upper()
+    if first_token in _DDL_KEYWORDS:
+        op = 'DDL'
+    elif first_token in ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE'):
+        op = first_token
+    elif first_token == 'SET':
+        # SET @firewall_user 等会话变量，不算业务 SQL
+        return 'SET', set()
+    elif first_token in ('SHOW', 'EXPLAIN', 'DESC', 'DESCRIBE', 'USE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'START', 'SAVEPOINT'):
+        return 'META', set()
+    else:
+        op = 'OTHER'
+
+    tables = set()
+    try:
+        parsed = sqlparse.parse(sql_stripped)
+        if not parsed:
+            return op, tables
+        stmt = parsed[0]
+        _collect_identifiers(stmt, tables, first_token)
+    except Exception as e:
+        logger.debug(f'parse_sql 解析失败，继续按空表处理：{e}')
+
+    return op, {t.lower() for t in tables}
+
+
+def _collect_identifiers(stmt, tables: set, first_token: str):
+    """从 sqlparse Statement 中递归收集表名"""
+    for tok in stmt.tokens:
+        if isinstance(tok, IdentifierList):
+            for t in tok.get_identifiers():
+                _collect_one(t, tables)
+        elif isinstance(tok, Identifier):
+            _collect_one(tok, tables)
+        elif isinstance(tok, Parenthesis):
+            # 子查询：递归
+            for sub in tok.tokens:
+                if hasattr(sub, 'tokens'):
+                    _collect_identifiers(sub, tables, first_token)
+        elif tok.ttype is sqlparse.tokens.Keyword and tok.value.upper() == 'FROM':
+            pass  # sqlparse 的扁平遍历已经处理过 FROM 后的 Identifier
+        # Where 子句可能有 JOIN ... ON，递归
+        elif isinstance(tok, Where):
+            for sub in tok.tokens:
+                if hasattr(sub, 'tokens'):
+                    _collect_identifiers(sub, tables, first_token)
+
+
+def _collect_one(tok, tables: set):
+    """处理单个 Identifier，提取表名（去掉 schema 前缀和别名）"""
+    name = tok.get_real_name() if hasattr(tok, 'get_real_name') else str(tok)
+    if name:
+        # 去掉反引号
+        name = name.strip('`').split()[0]
+        if name and not name.startswith('('):
+            tables.add(name)
+
+
+# --------------- ACL 决策 ---------------
+
+def check_table_acl(user: str, op: str, tables: set) -> tuple:
+    """
+    根据 (userId, 操作类型, 表集合) 决策
+    返回 (allowed: bool, reason: str)
+    """
+    # SET / META 类 SQL 不受 ACL 限制
+    if op in ('SET', 'META', 'OTHER'):
+        return True, f'{op} 不受 ACL 限制'
+
+    if not tables:
+        # 无法解析出表名，按配置决策
+        return ALLOW_ON_PARSE_FAIL, '无法解析表名，按 ALLOW_ON_PARSE_FAIL 决策'
+
+    user_rules = _ACL_CACHE.get(user)
+    if user_rules is None:
+        # 用户没精确匹配，找通配符 '*'
+        user_rules = _ACL_CACHE.get('*')
+    if user_rules is None:
+        return False, f'用户 {user} 不在 ACL 白名单'
+
+    for tbl in tables:
+        # 1. 精确表名匹配
+        allowed_ops = user_rules.get(tbl)
+        # 2. 表名通配符
+        if allowed_ops is None and '*' in user_rules:
+            allowed_ops = user_rules['*']
+        if allowed_ops is None:
+            return False, f'用户 {user} 无权访问表 {tbl}'
+        if 'ALL' not in allowed_ops and op not in allowed_ops:
+            return False, f'用户 {user} 对 {tbl} 无 {op} 权限（仅 {",".join(sorted(allowed_ops))}）'
+
+    return True, 'OK'
 
 
 # --------------- MySQL 协议解析 ---------------
@@ -140,29 +334,6 @@ async def read_mysql_packet(reader: asyncio.StreamReader) -> bytes:
     return header + payload
 
 
-# --------------- ACL 检查 ---------------
-
-def check_acl(firewall_user: str, sql: str) -> tuple:
-    """
-    检查 SQL 是否被允许
-    返回 (allowed: bool, reason: str)
-    """
-    if firewall_user not in ACL_RULES:
-        return True, '无规则限制'
-    rules = ACL_RULES[firewall_user]
-    sql_upper = sql.strip().upper()
-    for pattern in rules.get('deny_sql', []):
-        if sql_upper.startswith(pattern.upper()):
-            return False, f'命中拒绝规则: {pattern}'
-    allowed = rules.get('allow_sql', [])
-    if allowed:
-        for pattern in allowed:
-            if sql_upper.startswith(pattern.upper()):
-                return True, f'命中允许规则: {pattern}'
-        return False, '不在允许列表中'
-    return True, '无规则限制'
-
-
 # --------------- 代理核心 ---------------
 
 class FirewallProxy:
@@ -202,11 +373,9 @@ class FirewallProxy:
                 f'from={client_addr}'
             )
 
-            # 打印所有连接属性（调试用）
             for k, v in info['attrs'].items():
                 logger.info(f'         属性: {k} = {v}')
 
-            # 转发握手响应到 MySQL
             mysql_writer.write(hs_response)
             await mysql_writer.drain()
 
@@ -228,9 +397,7 @@ class FirewallProxy:
             logger.info(f'{C_YELLOW}[#{conn_id}] 连接关闭 (firewall_user={firewall_user}){C_RESET}')
 
     async def _forward_client(self, src, mysql_dst, client_dst, conn_id, initial_user):
-        """客户端 → MySQL，审计 SQL，跟踪 session 变量"""
-        # 使用可变容器跟踪当前连接的用户身份
-        # 初始值来自连接属性，后续可通过 SET @firewall_user 更新
+        """客户端 → MySQL，审计 SQL，跟踪 session 变量，按 ACL 决策"""
         session = {'firewall_user': initial_user}
 
         try:
@@ -243,19 +410,7 @@ class FirewallProxy:
                     sql = packet[5:].decode('utf-8', errors='replace')
                     current_user = session['firewall_user']
 
-                    # 调试：打印 SQL 的前 60 字节的 hex 和原文，方便排查 Connector/J 是否加注释
-                    if 'firewall_user' in sql.lower():
-                        logger.info(
-                            f'{C_YELLOW}[#{conn_id}] DEBUG SQL hex:{C_RESET} '
-                            f'{sql[:60].encode("utf-8").hex()}'
-                        )
-                        logger.info(
-                            f'{C_YELLOW}[#{conn_id}] DEBUG SQL raw:{C_RESET} '
-                            f'{repr(sql[:60])}'
-                        )
-
-                    # 检测 SET @firewall_user = 'xxx' 语句
-                    # 使用宽松匹配：Connector/J 8.x 可能在 SQL 前加注释，或使用 @@session. 前缀
+                    # 检测 SET @firewall_user = 'xxx' 语句，更新会话身份
                     m = re.search(
                         r"@+firewall_user\s*=\s*'([^']*)'",
                         sql,
@@ -271,28 +426,31 @@ class FirewallProxy:
                                 f'{C_CYAN}{new_user}{C_RESET}'
                             )
                         session['firewall_user'] = new_user
-                        # 转发 SET 语句到 MySQL
                         mysql_dst.write(packet)
                         await mysql_dst.drain()
                         continue
 
-                    allowed, reason = check_acl(current_user, sql)
+                    # L2 表级 ACL 决策
+                    op, tables = parse_sql(sql)
+                    allowed, reason = check_table_acl(current_user, op, tables)
 
                     if allowed:
                         if LOG_SQL:
                             logger.info(
                                 f'{C_CYAN}[#{conn_id}]{C_RESET} '
-                                f'QUERY [user={current_user}]: {sql[:200]}'
+                                f'QUERY [user={current_user}] [{op}/{",".join(sorted(tables)) or "-"}]: {sql[:200]}'
                             )
                         mysql_dst.write(packet)
                         await mysql_dst.drain()
                     else:
                         logger.warning(
                             f'{C_RED}[#{conn_id}] BLOCKED [user={current_user}] '
-                            f'{reason}: {sql[:200]}{C_RESET}'
+                            f'[{op}/{",".join(sorted(tables))}] {reason}: {sql[:200]}{C_RESET}'
                         )
-                        # 发送错误包给客户端，不转发给 MySQL
-                        err = build_error_packet(seq + 1, 1142, f'Firewall: SQL blocked - {reason}')
+                        err = build_error_packet(
+                            seq + 1, 1142,
+                            f'Firewall: SQL blocked - {reason}'
+                        )
                         client_dst.write(err)
                         await client_dst.drain()
                 else:
@@ -319,15 +477,31 @@ class FirewallProxy:
 # --------------- 启动 ---------------
 
 async def main():
-    logger.info(f'{C_GREEN}MySQL 防火墙代理启动{C_RESET}')
+    logger.info(f'{C_GREEN}MySQL 数据库防火墙代理启动 (L2 表级 ACL){C_RESET}')
     logger.info(f'  监听:   {LISTEN_HOST}:{LISTEN_PORT}')
     logger.info(f'  MySQL:  {MYSQL_HOST}:{MYSQL_PORT}')
+    logger.info(f'  ACL DB: {ACL_DB_CONFIG["host"]}:{ACL_DB_CONFIG["port"]}/{ACL_DB_CONFIG["database"]}')
     logger.info(f'  SQL审计: {"开启" if LOG_SQL else "关闭"}')
-    logger.info(f'  ACL规则: {len(ACL_RULES)} 个用户已配置')
-    logger.info(f'')
+    logger.info('')
+
+    # 加载 ACL 策略
+    if not load_acl_from_db():
+        logger.warning(
+            f'{C_YELLOW}ACL 策略加载失败，将以"放行模式"启动（不拦截，仅审计）{C_RESET}'
+        )
+    logger.info('')
+
+    # 注册 SIGUSR1 热加载
+    try:
+        signal.signal(signal.SIGUSR1, _handle_sigusr1)
+        logger.info('  热加载: 已注册，发送 SIGUSR1 重新加载 ACL（pkill -SIGUSR1 -f mysql_firewall.py）')
+    except Exception as e:
+        logger.warning(f'  无法注册 SIGUSR1：{e}')
+
+    logger.info('')
     logger.info(f'  修改应用 JDBC URL 端口为 {LISTEN_PORT}:')
     logger.info(f'  jdbc:mysql://localhost:{LISTEN_PORT}/smart_admin_v3?...')
-    logger.info(f'')
+    logger.info('')
 
     proxy = FirewallProxy()
     server = await asyncio.start_server(

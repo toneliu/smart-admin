@@ -401,7 +401,7 @@ Nginx → server.port(1024)  Spring Boot / Tomcat
 | ThreadLocal 容器 | `FirewallContextHolder`（来自 firewall-jdbc 依赖） | 暴露 `setCurrentUser` / `getCurrentUser` 静态方法，请求线程内共享身份 |
 | SQL 注入 | [sa-base/.../config/FirewallMyBatisInterceptor.java](smart-admin-api-java17-springboot3/sa-base/src/main/java/net/lab1024/sa/base/config/FirewallMyBatisInterceptor.java) | MyBatis `StatementHandler.prepare` 拦截器；在执行业务 SQL 前，先用当前 Connection 发 `SET @firewall_user = '<safeUser>'`，再做字符过滤防 SQL 注入 |
 | 拦截器注册 | [sa-admin/.../config/MvcConfig.java](smart-admin-api-java17-springboot3/sa-admin/src/main/java/net/lab1024/sa/admin/config/MvcConfig.java) | 先注册 `FirewallIdentityInterceptor`，再注册 `AdminInterceptor`（鉴权），保证身份先于鉴权注入 |
-| 数据库代理 | [firewall/mysql_firewall.py](firewall/mysql_firewall.py) | Python 异步 TCP 代理，监听 `0.0.0.0:3306` 转发到真实 MySQL `127.0.0.1:3308`；解析握手包连接属性 + 跟踪 `SET @firewall_user` 语句；提供 SQL 审计日志 + 按 user 的 ACL 拦截 |
+| 数据库代理 | [firewall/mysql_firewall.py](firewall/mysql_firewall.py) | Python 异步 TCP 代理，监听 `0.0.0.0:3306` 转发到真实 MySQL `127.0.0.1:3308`；解析握手包连接属性 + 跟踪 `SET @firewall_user` 语句；用 `sqlparse` 解析 SQL 提取操作类型+表名，按 [firewall/acl_schema.sql](firewall/acl_schema.sql) 中的 `t_firewall_acl` 表做表级 ACL 决策；支持 SIGUSR1 热加载策略 |
 
 #### 4. 运行原理详解
 
@@ -423,32 +423,49 @@ Nginx → server.port(1024)  Spring Boot / Tomcat
   - 连接一断开，变量立即消失；
   - 因此非常适合用作「连接级身份标记」——每次从连接池拿到连接时设置一次，后续该连接上的所有 SQL 自动带上身份。
 
-**防火墙侧（身份识别 + 审计 + ACL）**
+**防火墙侧（身份识别 + SQL 解析 + 审计 + ACL）**
 
 - Python 代理在 TCP 层拦截所有客户端 → MySQL 的字节流，按 MySQL 协议解析：
-  - 握手阶段：解析客户端握手响应包，从连接属性 `attrs['firewall_user']` 取初始身份（兼容 JDBC `connectionAttributes`）；
-  - 命令阶段：拦截 `COM_QUERY` (0x03) 命令，用宽松正则匹配 `@+firewall_user\s*=\s*'([^']*)'`（兼容 Connector/J 8.x 可能的注释前缀和 `@@session.` 前缀）；
-  - 一旦识别到 `SET @firewall_user = 'xxx'`，更新本连接的 `session['firewall_user']`，后续所有 SQL 都会被打上 `user=xxx` 标签输出到审计日志；
-  - 如果用户命中 ACL 规则，直接构造 MySQL Error 包（错误码 1142）回给客户端，**不会转发到真实 MySQL**。
+  - **握手阶段**：解析客户端握手响应包，从连接属性 `attrs['firewall_user']` 取初始身份（兼容 JDBC `connectionAttributes`）；
+  - **身份切换**：拦截 `COM_QUERY` (0x03) 命令，用宽松正则匹配 `@+firewall_user\s*=\s*'([^']*)'`（兼容 Connector/J 8.x 可能的注释前缀和 `@@session.` 前缀），识别到 `SET @firewall_user = 'xxx'` 后更新本连接的 `session['firewall_user']`；
+  - **SQL 解析**：用 `sqlparse` 解析每条业务 SQL，提取操作类型（SELECT/INSERT/UPDATE/DELETE/DDL/SET/META）和涉及的表名集合；
+  - **L2 ACL 决策**：根据 `(userId, 表集合, 操作类型)` 在内存 `_ACL_CACHE`（从 `t_firewall_acl` 表加载）中查询三维矩阵，按精确匹配→用户通配符→表通配符→双通配符优先级匹配 `allowed_ops`；
+  - **审计日志**：每条 SQL 都会被打上 `user=xxx [OP/表名]` 标签输出到日志；
+  - **拦截**：未授权 SQL 直接构造 MySQL Error 包（错误码 1142）回给客户端，**不会转发到真实 MySQL**。
 
 #### 5. 部署步骤
+
+**Step 0：安装依赖 + 建 ACL 表**（仅首次部署需要）
+
+```bash
+# 1. 安装 Python 依赖
+pip3 install sqlparse pymysql
+
+# 2. 在真实 MySQL 上执行 ACL 建表脚本（含示例策略）
+mysql -h127.0.0.1 -P3308 -uroot -p smart_admin_v3 < firewall/acl_schema.sql
+
+# 3. 修改防火墙脚本顶部的 ACL_DB_CONFIG 指向你的真实 MySQL
+#    编辑 firewall/mysql_firewall.py 中的 ACL_DB_CONFIG 字典
+#    （建议为防火墙单独建一个只读账号：GRANT SELECT ON smart_admin_v3.t_firewall_acl TO 'firewall'@'127.0.0.1';）
+```
 
 **Step 1：启动 Python 防火墙代理**（部署在 MySQL 同机或同 VPC 内）
 
 ```bash
-# 默认监听 0.0.0.0:3306，转发到 127.0.0.1:3308
+# 默认监听 0.0.0.0:3306，转发到真实 127.0.0.1:3308
 python3 firewall/mysql_firewall.py
 ```
 
-如需修改监听/上游端口/ACL，直接编辑脚本顶部常量：
+启动日志会打印已加载的 ACL 规则；如需修改监听/上游端口，编辑脚本顶部常量：
 
 ```python
 LISTEN_HOST = '0.0.0.0'
 LISTEN_PORT = 3306          # 防火墙监听端口
 MYSQL_HOST  = '127.0.0.1'
 MYSQL_PORT  = 3308          # 真实 MySQL 端口
-ACL_RULES = { ... }        # 见第 6 节
-LOG_SQL    = True           # 是否记录 SQL
+ACL_DB_CONFIG = { ... }     # ACL 策略数据库连接
+ALLOW_ON_PARSE_FAIL = True  # 解析不出表名时是否放行（True=监控模式）
+LOG_SQL    = True           # 是否记录每条 SQL
 ```
 
 **Step 2：让真实 MySQL 只监听内网/本地**
@@ -479,36 +496,100 @@ port = 3308
 ```
 [#1] 连接建立: db_user=root, firewall_user=unknown, db=smart_admin_v3, from=...
 [#1] 身份切换: unknown → 1
-[#1] QUERY [user=1]: select * from t_employee where employee_id = ?
-[#1] QUERY [user=1]: update t_employee set ... where employee_id = 1
+[#1] QUERY [user=1] [SELECT/t_employee]: select * from t_employee where employee_id = ?
+[#1] QUERY [user=1] [UPDATE/t_employee]: update t_employee set ... where employee_id = 1
 ```
+
+日志中的 `[OP/表名]` 是 L2 ACL 决策的依据。若被拦截，会输出 `BLOCKED` 红色日志，应用端会收到 `Error 1142`。
 
 若 `user=` 仍为 `unknown`，对照 [firewall/mysql_firewall.py](firewall/mysql_firewall.py) 中的 DEBUG SQL hex / raw 日志确认 Connector/J 实际下发的 SQL 文本（可能含前缀注释）。
 
-#### 6. ACL 规则配置
+#### 6. 表级 ACL 权限控制（L2）
 
-`ACL_RULES` 是一个 `firewall_user → 规则` 的字典，**默认为空 = 监控模式（只审计不拦截）**。示例：
+防火墙的 ACL 已升级为 **L2 表级权限**：按 `(userId, 表名, 操作类型)` 三维矩阵决策，策略存储在 MySQL 的 `t_firewall_acl` 表中。
 
-```python
-ACL_RULES = {
-    # 禁止 admin（userId=1）执行 DROP / TRUNCATE / DELETE FROM
-    '1': {
-        'deny_sql': ['DROP', 'TRUNCATE', 'DELETE FROM'],
-    },
-    # 只允许 operator（userId=2）执行 SELECT
-    '2': {
-        'allow_sql': ['SELECT'],
-    },
-}
-```
-
-匹配规则：对 SQL 去除前后空格并转大写后，按 `startswith` 前缀匹配。命中 `deny_sql` 直接拒绝；若配置了 `allow_sql` 则只允许命中的前缀，其余拒绝。
-
-被拦截的 SQL 不会到达 MySQL，客户端会收到：
+**决策流程**：
 
 ```
-Error 1142: Firewall: SQL blocked - 命中拒绝规则: DROP
+SQL 文本
+  │
+  ├─ 1. sqlparse 解析 → 提取 (操作类型, 涉及的表集合)
+  │     操作类型: SELECT / INSERT / UPDATE / DELETE / DDL / SET / META
+  │
+  ├─ 2. 查策略表 t_firewall_acl（内存缓存 _ACL_CACHE）
+  │     匹配优先级：
+  │       a) 精确 userId + 精确 table_name
+  │       b) 精确 userId + 通配符 table_name='*'
+  │       c) 通配符 userId='*' + 精确 table_name
+  │       d) 通配符 userId='*' + 通配符 table_name='*'
+  │
+  └─ 3. 检查 op 是否在 allowed_ops 集合中
+        ALL → 全部允许
+        其他 → 必须 op 在集合中
 ```
+
+**表结构**（[firewall/acl_schema.sql](firewall/acl_schema.sql)）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `user_id` | varchar(64) | 用户ID；`*` = 通配符，匹配所有未精确匹配的用户 |
+| `table_name` | varchar(128) | 表名；`*` = 通配符，匹配所有未精确匹配的表 |
+| `allowed_ops` | varchar(256) | 允许的操作，逗号分隔：`SELECT,INSERT,UPDATE,DELETE,DDL,ALL`；`ALL` 表示全部 |
+| `enabled` | tinyint | 1=启用 0=禁用 |
+| `remark` | varchar(255) | 备注 |
+
+**初始化示例策略**（acl_schema.sql 已包含 INSERT）：
+
+```text
+user_id | table_name   | allowed_ops              | 说明
+--------+--------------+--------------------------+---------------------------
+1       | *            | ALL                      | admin 全表全操作
+2       | t_employee   | SELECT,UPDATE            | hr 只读+更新员工
+2       | t_department | ALL                      | hr 全操作部门
+3       | *            | SELECT                   | 普通员工只读
+*       | *            | SELECT,INSERT,UPDATE,DELETE | 默认：允许 DML，禁止 DDL
+```
+
+**拦截效果示例**：
+
+| 用户 | SQL | 结果 |
+|---|---|---|
+| 1 (admin) | `DROP TABLE t_employee` | ✅ 通过（ALL） |
+| 2 (hr) | `SELECT * FROM t_employee` | ✅ 通过 |
+| 2 (hr) | `DELETE FROM t_employee WHERE id=1` | ❌ 拒绝（无 DELETE） |
+| 2 (hr) | `SELECT * FROM t_role` | ❌ 拒绝（无 t_role 权限） |
+| 2 (hr) | `ALTER TABLE t_employee ...` | ❌ 拒绝（DDL 未授权） |
+| 3 (员工) | `UPDATE t_employee SET ...` | ❌ 拒绝（只读） |
+| 9 (未配置) | `SELECT * FROM t_employee` | ✅ 通过（命中 `*/*` 默认规则，允许 SELECT） |
+| 9 (未配置) | `DROP TABLE t_xxx` | ❌ 拒绝（默认禁止 DDL） |
+
+被拦截的 SQL 不会到达真实 MySQL，客户端会收到：
+
+```
+Error 1142: Firewall: SQL blocked - 用户 2 对 t_employee 无 DELETE 权限（仅 SELECT,UPDATE）
+```
+
+**策略热加载**：
+
+修改 `t_firewall_acl` 表后无需重启防火墙，发送 SIGUSR1 信号即可重新拉取策略到内存：
+
+```bash
+pkill -SIGUSR1 -f mysql_firewall.py
+```
+
+防火墙日志会输出：
+
+```
+[xx:xx:xx] 收到 SIGUSR1，重新加载 ACL 策略...
+[xx:xx:xx] ACL 策略已加载：N 条规则，覆盖 M 个用户
+```
+
+**不受 ACL 限制的 SQL 类型**（自动放行）：
+
+- `SET`（包括 `SET @firewall_user`）
+- `META`：`SHOW / EXPLAIN / DESC / DESCRIBE / USE / BEGIN / COMMIT / ROLLBACK / START / SAVEPOINT`
+- `OTHER`：无法识别首关键字的 SQL（如 PRAGMA、HINT 等）
+- 解析不出表名的 SQL：按 `ALLOW_ON_PARSE_FAIL` 全局开关决策（默认放行，监控模式）
 
 #### 7. 故障排查
 
